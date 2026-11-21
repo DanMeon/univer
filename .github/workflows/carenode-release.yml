@@ -27,6 +27,12 @@ concurrency:
 permissions:
     contents: read
 
+# An explicit `bash` runs each step with `-eo pipefail`; the unset default is `bash -e`, under which a check piped
+# into `tee` passes even when the check fails.
+defaults:
+    run:
+        shell: bash
+
 env:
     TURBO_TELEMETRY_DISABLED: '1'
     # Same runtime as upstream's release-npm.yml; each build job fails when the two differ.
