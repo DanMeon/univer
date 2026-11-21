@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the sheet gets a copy of each moved cell (xlsxkit move-range-cell-copy)
+
 import type {
     ICellData,
     IMutation,
@@ -22,7 +24,7 @@ import type {
     Nullable,
     Workbook,
 } from '@univerjs/core';
-import { CommandType, IUniverInstanceService, ObjectMatrix, UniverInstanceType } from '@univerjs/core';
+import { CommandType, IUniverInstanceService, ObjectMatrix, Tools, UniverInstanceType } from '@univerjs/core';
 
 export interface IMoveRangeMutationParams {
     unitId: string;
@@ -64,11 +66,14 @@ export const MoveRangeMutation: IMutation<IMoveRangeMutationParams, boolean> = {
         const fromCellMatrix = fromWorksheet.getCellMatrix();
         const toCellMatrix = toWorksheet.getCellMatrix();
 
+        // Carenode xlsxkit move-range-cell-copy: the sheet gets a copy of each cell, not the params' own object. A later
+        // write merges into the sheet's cell object (set-range-values) and undo/redo run these params again, so a shared
+        // object let every later edit of the cell rewrite the undo/redo record too.
         new ObjectMatrix<Nullable<ICellData>>(from.value).forValue((row, col, newVal) => {
             if (newVal === null || newVal === undefined) {
                 fromCellMatrix.realDeleteValue(row, col);
             } else {
-                fromCellMatrix.setValue(row, col, newVal);
+                fromCellMatrix.setValue(row, col, Tools.deepClone(newVal));
             }
         });
 
@@ -76,7 +81,7 @@ export const MoveRangeMutation: IMutation<IMoveRangeMutationParams, boolean> = {
             if (newVal === null || newVal === undefined) {
                 toCellMatrix.realDeleteValue(row, col);
             } else {
-                toCellMatrix.setValue(row, col, newVal);
+                toCellMatrix.setValue(row, col, Tools.deepClone(newVal)); // Carenode xlsxkit move-range-cell-copy
             }
         });
 
