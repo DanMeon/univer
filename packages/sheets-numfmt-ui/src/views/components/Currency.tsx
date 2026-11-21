@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-import type { LocaleKey } from '../../locale/types';
-import type { IBusinessComponentProps } from './interface';
+// Modified by Carenode, 2026 — the currency panel starts at no decimals on a cell without a format (xlsxkit currency-panel-decimal-0)
+
 import { isPatternEqualWithoutDecimal, LocaleService } from '@univerjs/core';
 import { InputNumber, Select, SelectList } from '@univerjs/design';
 import {
@@ -26,6 +26,8 @@ import {
 } from '@univerjs/sheets-numfmt';
 import { useDependency } from '@univerjs/ui';
 import { useContext, useLayoutEffect, useMemo, useState } from 'react';
+import type { LocaleKey } from '../../locale/types';
+import type { IBusinessComponentProps } from './interface';
 import { UserHabitCurrencyContext } from '../../controllers/user-habit.controller';
 
 export const isCurrencyPanel = (pattern: string) => {
@@ -38,7 +40,9 @@ export function CurrencyPanel(props: IBusinessComponentProps) {
     const localeService = useDependency(LocaleService);
     const userHabitCurrency = useContext(UserHabitCurrencyContext);
     const [suffix, setSuffix] = useState(() => getCurrencyType(props.defaultPattern) || userHabitCurrency[0]);
-    const [decimal, setDecimal] = useState(() => getDecimalFromPattern(props.defaultPattern || '', 2));
+    // Carenode xlsxkit currency-panel-decimal-0: a cell with no format starts at no decimals (upstream: 2), like the
+    // ribbon's currency button and Ctrl+Shift+4 (`₩#,##0`). A cell with a format keeps that format's decimals.
+    const [decimal, setDecimal] = useState(() => getDecimalFromPattern(props.defaultPattern || '', 0));
     const [pattern, setPattern] = useState(() => {
         const negativeOptions = getCurrencyFormatOptions(suffix);
         const pattern =
