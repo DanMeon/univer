@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3483 (b'): paste-range resolver seam in _getPastedRange.
+
 import type {
     ICellData,
     ICellDataWithSpanAndDisplay,
@@ -45,6 +47,7 @@ import {
     getEmptyCell,
     getNumfmtLocaleTag,
     ICommandService,
+    IConfigService,
     ILogService,
     Inject,
     Injector,
@@ -102,6 +105,7 @@ import type {
     ISheetDiscreteRangeLocation,
     IUniverSheetCopyDataModel,
 } from './type';
+import type { XlsxkitPasteRangeResolver } from './xlsxkit-paste-range-resolver';
 import { virtualizeDiscreteRanges } from '../../controllers/utils/range-tools';
 import { IMarkSelectionService } from '../mark-selection/mark-selection.service';
 import { SheetSkeletonManagerService } from '../sheet-skeleton-manager.service';
@@ -123,6 +127,7 @@ import {
     rangeIntersectWithDiscreteRange,
     spilitLargeSetRangeValuesMutations,
 } from './utils';
+import { XLSXKIT_PASTE_RANGE_RESOLVER_CONFIG_KEY } from './xlsxkit-paste-range-resolver';
 
 export const PREDEFINED_HOOK_NAME_COPY = {
     DEFAULT_COPY: 'default-copy',
@@ -1630,7 +1635,40 @@ export class SheetClipboardService extends Disposable implements ISheetClipboard
         };
     }
 
+    /**
+     * Carenode CNT-3483 (b'): the upstream paste range, then the resolver Carenode registers may move it onto the
+     * sheet's merge grid (see xlsxkit-paste-range-resolver.ts).
+     */
     private _getPastedRange(cellMatrix: ObjectMatrix<ICellDataWithSpanAndDisplay>, location: ISheetRangeLocation) {
+        const res = this._getPastedRangeStock(cellMatrix, location);
+        if (!res) {
+            return res;
+        }
+        const resolve = this._injector.get(IConfigService).getConfig<XlsxkitPasteRangeResolver>(XLSXKIT_PASTE_RANGE_RESOLVER_CONFIG_KEY);
+        if (typeof resolve !== 'function') {
+            return res;
+        }
+        const worksheet = this._univerInstanceService
+            .getUnit<Workbook>(res.unitId, UniverInstanceType.UNIVER_SHEET)
+            ?.getSheetBySheetId(res.subUnitId);
+        if (!worksheet) {
+            return res;
+        }
+        const resolved = resolve({
+            unitId: res.unitId,
+            subUnitId: res.subUnitId,
+            pastedRange: res.pastedRange,
+            cellMatrix,
+            mergeData: worksheet.getMergeData(),
+        });
+        if (resolved) {
+            res.pastedRange.rows = resolved.rows;
+            res.pastedRange.cols = resolved.cols;
+        }
+        return res;
+    }
+
+    private _getPastedRangeStock(cellMatrix: ObjectMatrix<ICellDataWithSpanAndDisplay>, location: ISheetRangeLocation) {
         const target = this._getPastingTarget(location);
         const { selection, unitId, subUnitId } = target;
         if (!subUnitId || !selection) {
