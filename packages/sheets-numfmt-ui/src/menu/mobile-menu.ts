@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the mobile currency option and custom currency rows write what the desktop ones write
+
 import type { IAccessor } from '@univerjs/core';
 import type { IMenuSelectorItem } from '@univerjs/ui';
-import type { LocaleKey } from '../locale/types';
 import {
     DEFAULT_TEXT_FORMAT_EXCEL,
     LocaleService,
@@ -34,13 +35,14 @@ import {
     CURRENCYFORMAT,
     getCurrencySymbolByLocale,
     NUMBERFORMAT,
-    SetCurrencyCommand,
+    setPatternDecimal,
     SetPercentCommand,
     SubtractDecimalCommand,
 } from '@univerjs/sheets-numfmt';
 import { getCurrentRangeDisable$ } from '@univerjs/sheets-ui';
 import { getMenuHiddenObservable, MenuItemType } from '@univerjs/ui';
 import { combineLatest, distinctUntilChanged, map } from 'rxjs';
+import type { LocaleKey } from '../locale/types';
 import { SetMobileNumfmtCommand } from '../commands/commands/set-mobile-numfmt.command';
 import { MENU_OPTIONS } from './number-format-options';
 import { getCurrentNumfmtPattern$, getNumberFormatLabelKey } from './numfmt-menu-util';
@@ -73,6 +75,20 @@ export interface IMobileNumberFormatMenuConfig {
     customPatterns: string[];
 }
 
+// Carenode: the mobile currency paths write what the desktop ones write. Upstream's quick 「currency」 option ran
+// SetCurrencyCommand, which writes getCurrencyFormat(region) - `"₩"#,##0.00_);[Red]("₩"#,##0.00)` on a Korean
+// region - and the custom view's currency rows were the currency panel's lines with two decimals (`"₩"#,##0.00` ...).
+// The quick option now writes the number-format list's currency entry (`₩#,##0`, the same as the desktop list, the
+// editor's ribbon button and Ctrl+Shift+4), and the custom view's currency rows are the currency panel's lines at the
+// panel's default of no decimals (`"₩"#,##0` first), so every currency path shows `₩1,234`.
+function xlsxkitListCurrencyPattern(currencySymbol: string): string {
+    const entry = MENU_OPTIONS(currencySymbol).find((item) => item !== '|' && item.label === 'sheets-numfmt-ui.currency');
+    if (!entry || entry === '|' || !entry.pattern) {
+        throw new Error('[sheets-numfmt-ui] the number-format list has no currency entry');
+    }
+    return entry.pattern;
+}
+
 export function createMobileNumberFormatMenuConfig(currencySymbol: string): IMobileNumberFormatMenuConfig {
     const detailOptions: IMobileNumberFormatMenuConfig['detailOptions'] = MENU_OPTIONS(currencySymbol)
         .slice(0, -1)
@@ -90,7 +106,7 @@ export function createMobileNumberFormatMenuConfig(currencySymbol: string): IMob
         customComponent: MOBILE_CUSTOM_NUMFMT_COMPONENT,
         quickOptions: [
             { label: 'sheets-numfmt-ui.percent', commandId: SetPercentCommand.id },
-            { label: 'sheets-numfmt-ui.currency', commandId: SetCurrencyCommand.id },
+            { label: 'sheets-numfmt-ui.currency', commandId: SetMobileNumfmtCommand.id, value: xlsxkitListCurrencyPattern(currencySymbol) },
             { label: 'sheets-numfmt-ui.date', commandId: SetMobileNumfmtCommand.id, value: 'yyyy-mm-dd;@' },
             {
                 label: 'sheets-numfmt-ui.text',
@@ -104,7 +120,7 @@ export function createMobileNumberFormatMenuConfig(currencySymbol: string): IMob
         ],
         detailOptions,
         customPatterns: [...new Set([
-            ...CURRENCYFORMAT.map((item) => item.suffix(currencySymbol)),
+            ...CURRENCYFORMAT.map((item) => setPatternDecimal(item.suffix(currencySymbol), 0)),
             ...NUMBERFORMAT.map((item) => item.suffix),
         ])],
     };
