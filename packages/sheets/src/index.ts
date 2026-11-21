@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176: export the calculation-settings lock seam for @univerjs/sheets-formula-ui.
+
 export type { ICellOverGridPosition, ISheetOverGridPosition } from './basics/cell-position';
 export { checkCellValueType, getCellType, isCellImage } from './basics/cell-type';
 export { getCellValue } from './basics/cell-value';
@@ -73,6 +75,15 @@ export {
     rangeToDiscreteRange,
     serializeListOptions,
 } from './basics/utils';
+export {
+    getXlsxkitCalculationSettingsLock,
+    XLSXKIT_CALCULATION_SETTINGS_LOCK_RESOLVER_CONFIG_KEY,
+} from './basics/xlsxkit-calculation-settings-lock';
+export type {
+    IXlsxkitCalculationSettingsLock,
+    IXlsxkitCalculationSettingsLockProbe,
+    XlsxkitCalculationSettingsLockResolver,
+} from './basics/xlsxkit-calculation-settings-lock';
 export { AddRangeProtectionCommand } from './commands/commands/add-range-protection.command';
 export type { IAddRangeProtectionCommandParams } from './commands/commands/add-range-protection.command';
 export {

@@ -14,10 +14,12 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176: open read-only with the host's notice while its calculation-settings lock holds.
+
 import type { Workbook } from '@univerjs/core';
-import type { LocaleKey } from '../../locale/types';
 import {
     ICommandService,
+    IConfigService,
     IPermissionService,
     IUniverInstanceService,
     LocaleService,
@@ -26,9 +28,10 @@ import {
     UniverInstanceType,
 } from '@univerjs/core';
 import { Button, Checkbox, Input } from '@univerjs/design';
-import { SetWorkbookCalculationSettingsCommand, WorkbookEditablePermission } from '@univerjs/sheets';
+import { getXlsxkitCalculationSettingsLock, SetWorkbookCalculationSettingsCommand, WorkbookEditablePermission } from '@univerjs/sheets';
 import { IDialogService, useDependency, useObservable } from '@univerjs/ui';
 import { useState } from 'react';
+import type { LocaleKey } from '../../locale/types';
 import { CALCULATION_OPTIONS_DIALOG } from './interface';
 
 export interface ICalculationOptionsProps {
@@ -41,10 +44,14 @@ export function CalculationOptions({ unitId }: ICalculationOptionsProps) {
     const permissionService = useDependency(IPermissionService);
     const dialogService = useDependency(IDialogService);
     const localeService = useDependency(LocaleService);
+    const configService = useDependency(IConfigService);
     const workbook = instanceService.getUnit<Workbook>(unitId, UniverInstanceType.UNIVER_SHEET);
     const permissionId = new WorkbookEditablePermission(unitId).id;
     const permission = useObservable(permissionService.getPermissionPoint$(permissionId), undefined, false);
-    const readOnly = !workbook || (permission?.value ?? permissionService.getPermissionPoint(permissionId)?.value) === false;
+    // Carenode CNT-5176: the host may hold these settings to the template; the command reads the same lock.
+    const lock = getXlsxkitCalculationSettingsLock(configService, unitId);
+    const readOnly = !workbook || lock !== null ||
+        (permission?.value ?? permissionService.getPermissionPoint(permissionId)?.value) === false;
     const [draft, setDraft] = useState(() => {
         const settings = normalizeWorkbookCalculationSettings(workbook?.getCalculationSettings());
         return {
@@ -90,6 +97,17 @@ export function CalculationOptions({ unitId }: ICalculationOptionsProps) {
             <p className="univer-m-0 univer-text-sm">
                 {localeService.t<LocaleKey>('sheets-formula-ui.calculation.workbook')}
             </p>
+            {lock && (
+                <p
+                    className={`
+                      univer-m-0 univer-rounded univer-bg-gray-50 univer-px-3 univer-py-2 univer-text-sm
+                      univer-text-gray-600
+                      dark:!univer-bg-gray-700 dark:!univer-text-gray-200
+                    `}
+                >
+                    {lock.notice}
+                </p>
+            )}
             <Checkbox
                 checked={draft.enabled}
                 disabled={readOnly}

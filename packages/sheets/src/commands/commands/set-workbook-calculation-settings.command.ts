@@ -14,16 +14,20 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176: refuse while the host's calculation-settings lock resolver answers a lock.
+
 import type { ICommand } from '@univerjs/core';
-import type { ISetWorkbookCalculationSettingsMutationParams } from '../mutations/set-workbook-calculation-settings.mutation';
 import {
     CommandType,
     ICommandService,
+    IConfigService,
     IPermissionService,
     IUndoRedoService,
     IUniverInstanceService,
     normalizeWorkbookCalculationSettings,
 } from '@univerjs/core';
+import type { ISetWorkbookCalculationSettingsMutationParams } from '../mutations/set-workbook-calculation-settings.mutation';
+import { getXlsxkitCalculationSettingsLock } from '../../basics/xlsxkit-calculation-settings-lock';
 import { WorkbookEditablePermission } from '../../services/permission/permission-point/workbook/editable';
 import { SetWorkbookCalculationSettingsMutation } from '../mutations/set-workbook-calculation-settings.mutation';
 import { getSheetCommandTargetWorkbook } from './utils/target-util';
@@ -45,6 +49,11 @@ export const SetWorkbookCalculationSettingsCommand: ICommand<ISetWorkbookCalcula
             new WorkbookEditablePermission(params.unitId).id
         );
         if (permission && !permission.value) {
+            return false;
+        }
+
+        // Carenode CNT-5176: the host may hold these settings to the template (xlsxkit-calculation-settings-lock.ts).
+        if (getXlsxkitCalculationSettingsLock(accessor.get(IConfigService), params.unitId)) {
             return false;
         }
 

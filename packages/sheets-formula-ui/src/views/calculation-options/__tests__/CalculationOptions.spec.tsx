@@ -14,10 +14,14 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176: the dialog with and without the host's calculation-settings lock.
+
 import type { IWorkbookCalculationSettings } from '@univerjs/core';
 import type { Root } from 'react-dom/client';
 import {
+    ConfigService,
     ICommandService,
+    IConfigService,
     Injector,
     IPermissionService,
     IUniverInstanceService,
@@ -25,7 +29,7 @@ import {
     LocaleType,
     MAX_ITERATION_COUNT,
 } from '@univerjs/core';
-import { SetWorkbookCalculationSettingsCommand } from '@univerjs/sheets';
+import { SetWorkbookCalculationSettingsCommand, XLSXKIT_CALCULATION_SETTINGS_LOCK_RESOLVER_CONFIG_KEY } from '@univerjs/sheets';
 import { IDialogService, RediContext } from '@univerjs/ui';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -65,14 +69,10 @@ describe('CalculationOptions', () => {
             getPermissionPoint: () => ({ value: true }),
         } as never }]);
         injector.add([IDialogService, { useValue: { close } as never }]);
+        injector.add([IConfigService, { useClass: ConfigService }]);
         container = document.createElement('div');
         document.body.appendChild(container);
-        root = createRoot(container);
-        act(() => root.render(
-            <RediContext.Provider value={{ injector }}>
-                <CalculationOptions unitId="u" />
-            </RediContext.Provider>
-        ));
+        mount();
     });
 
     afterEach(() => {
@@ -80,6 +80,32 @@ describe('CalculationOptions', () => {
         container.remove();
         injector.dispose();
     });
+
+    function mount() {
+        root = createRoot(container);
+        act(() => root.render(
+            <RediContext.Provider value={{ injector }}>
+                <CalculationOptions unitId="u" />
+            </RediContext.Provider>
+        ));
+    }
+
+    // Carenode CNT-5176: open the dialog again with the host's resolver registered first.
+    function remountWithResolver(value: unknown) {
+        act(() => root.unmount());
+        injector.get(IConfigService).setConfig(XLSXKIT_CALCULATION_SETTINGS_LOCK_RESOLVER_CONFIG_KEY, value);
+        mount();
+    }
+
+    function controls() {
+        const [count, change] = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="text"]'));
+        return {
+            checkbox: container.querySelector<HTMLInputElement>('input[type="checkbox"]')!,
+            count,
+            change,
+            ok: Array.from(container.querySelectorAll('button')).find((node) => node.textContent === 'OK')!,
+        };
+    }
 
     function edit(index: number, value: string) {
         const input = container.querySelectorAll<HTMLInputElement>('input[type="text"]')[index];
@@ -173,5 +199,50 @@ describe('CalculationOptions', () => {
             settings: { ...settings, iterativeCalculation: false },
         });
         expect(close).toHaveBeenCalledTimes(1);
+    });
+
+    describe('calculation-settings lock (Carenode CNT-5176)', () => {
+        const notice = 'These settings are changed in the template.';
+
+        it('opens read-only from the first render, keeps the settings visible and shows the notice', () => {
+            const resolve = vi.fn(() => ({ notice }));
+            remountWithResolver(resolve);
+            expect(resolve).toHaveBeenCalledWith({ unitId: 'u' });
+            const { checkbox, count, change, ok } = controls();
+            expect(checkbox.disabled).toBe(true);
+            expect(checkbox.checked).toBe(true);
+            expect(count.disabled).toBe(true);
+            expect(count.value).toBe('100');
+            expect(change.disabled).toBe(true);
+            expect(change.value).toBe('0.001');
+            expect(ok.disabled).toBe(true);
+            const shown = Array.from(container.querySelectorAll('p')).find((node) => node.textContent === notice);
+            expect(shown).toBeDefined();
+            expect(shown!.className).not.toContain('sr-only');
+        });
+
+        it('does nothing on confirm', () => {
+            remountWithResolver(() => ({ notice }));
+            confirm();
+            expect(execute).not.toHaveBeenCalled();
+            expect(close).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            ['a resolver that answers null', () => null],
+            ['a resolver that answers undefined', () => undefined],
+            ['a value that is not a function', { notice }],
+        ])('keeps the upstream dialog with %s', (_name, value) => {
+            remountWithResolver(value);
+            const { checkbox, count, change, ok } = controls();
+            expect(checkbox.disabled).toBe(false);
+            expect(count.disabled).toBe(false);
+            expect(change.disabled).toBe(false);
+            expect(ok.disabled).toBe(false);
+            expect(container.textContent).not.toContain(notice);
+            confirm();
+            expect(execute).toHaveBeenCalledWith(SetWorkbookCalculationSettingsCommand.id, { unitId: 'u', settings });
+            expect(close).toHaveBeenCalledWith(CALCULATION_OPTIONS_DIALOG);
+        });
     });
 });
