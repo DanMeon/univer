@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
-import type { IMutationCommonParams, Workbook } from '@univerjs/core';
+// Modified by Carenode, 2026 — only a peer protection mutation clears the undo history, as in 0.24
+
+import type { Workbook } from '@univerjs/core';
 import type { UnitAction } from '@univerjs/protocol';
 import {
     Disposable,
@@ -24,8 +26,6 @@ import {
     IPermissionService,
     IUndoRedoService,
     IUniverInstanceService,
-    RedoCommandId,
-    UndoCommandId,
     UniverInstanceType,
     UserManagerService,
 } from '@univerjs/core';
@@ -525,9 +525,12 @@ export class SheetPermissionInitController extends Disposable {
                     IAddRangeProtectionMutationParams
                     | IAddWorksheetProtectionParams
                     | ISetWorksheetPermissionPointsMutationParams
-                ) & IMutationCommonParams;
-                // Structural undo/redo can restore existing protection ranges along with rows or columns.
-                if (!options?.fromCollab && (params.trigger === UndoCommandId || params.trigger === RedoCommandId)) {
+                );
+                // Carenode: only a protection mutation that came from a peer clears the history, as in 0.24
+                // (`_refreshPermissionByCollaCreate`). Upstream also cleared on every local one but undo/redo, and the
+                // Carenode editor re-applies its protection locally after each peer row or column edit, so a peer's
+                // inserted row wiped the user's own undo history.
+                if (!options?.fromCollab) {
                     return;
                 }
                 if (command.id === AddRangeProtectionMutation.id && !(params as IAddRangeProtectionMutationParams).rules.length) {

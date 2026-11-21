@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the history boundary cases follow the peer-only clear
+
 import type { IMutationInfo } from '@univerjs/core';
 import {
     IAuthzIoService,
@@ -102,17 +104,24 @@ describe('protection history boundary', () => {
         return { ...bed, commands, history, edit };
     }
 
-    describe.each([false, true])('fromCollab: %s', (fromCollab) => {
-        it.each(protectionMutations)('clears both histories when $id takes effect', ({ id, params }) => {
-            const { commands, history, sheet } = createTestBed();
-            history.pushUndoRedo({ unitID: 'other-book', undoMutations: [], redoMutations: [] });
-            expect(commands.syncExecuteCommand(id, { ...params }, { fromCollab })).toBe(true);
-            expect(history.getUndoRedoStatus('test')).toEqual({ undos: 0, redos: 0 });
-            expect(history.getUndoRedoStatus('other-book')).toEqual({ undos: 1, redos: 0 });
-            expect(commands.syncExecuteCommand(UndoCommand.id)).toBe(false);
-            expect(commands.syncExecuteCommand(RedoCommand.id)).toBe(false);
-            expect(sheet.getSheetBySheetId('sheet1')!.getCell(0, 0)?.v).toBe('first');
-        });
+    // Carenode: only a protection mutation from a peer clears the history (0.24's condition).
+    it.each(protectionMutations)('clears both histories when $id comes from a peer', ({ id, params }) => {
+        const { commands, history, sheet } = createTestBed();
+        history.pushUndoRedo({ unitID: 'other-book', undoMutations: [], redoMutations: [] });
+        expect(commands.syncExecuteCommand(id, { ...params }, { fromCollab: true })).toBe(true);
+        expect(history.getUndoRedoStatus('test')).toEqual({ undos: 0, redos: 0 });
+        expect(history.getUndoRedoStatus('other-book')).toEqual({ undos: 1, redos: 0 });
+        expect(commands.syncExecuteCommand(UndoCommand.id)).toBe(false);
+        expect(commands.syncExecuteCommand(RedoCommand.id)).toBe(false);
+        expect(sheet.getSheetBySheetId('sheet1')!.getCell(0, 0)?.v).toBe('first');
+    });
+
+    it.each(protectionMutations)('keeps the history when $id is applied locally', ({ id, params }) => {
+        const { commands, history, sheet } = createTestBed();
+        expect(commands.syncExecuteCommand(id, { ...params })).toBe(true);
+        expect(history.getUndoRedoStatus('test')).toEqual({ undos: 1, redos: 1 });
+        expect(commands.syncExecuteCommand(RedoCommand.id)).toBe(true);
+        expect(sheet.getSheetBySheetId('sheet1')!.getCell(0, 0)?.v).toBe('second');
     });
 
     it.each([
@@ -121,15 +130,15 @@ describe('protection history boundary', () => {
         { id: SetProtectionCommand.id, params: { rule: { ...rangeRule } } },
         { id: SetProtectionCommand.id, params: { rule: { ...rangeRule }, oldRule: worksheetRule } },
         { id: SetProtectionCommand.id, params: { rule: worksheetRule, oldRule: rangeRule } },
-    ])('does not push newly applied protection back into history via $id', async ({ id, params }) => {
+    ])('does not push newly applied protection into history via $id', async ({ id, params }) => {
         const { commands, history } = createTestBed();
         await expect(commands.executeCommand(id, params)).resolves.toBe(true);
-        expect(history.getUndoRedoStatus('test')).toEqual({ undos: 0, redos: 0 });
+        expect(history.getUndoRedoStatus('test')).toEqual({ undos: 1, redos: 1 });
     });
 
     it('allows subsequent edits to build a new undo/redo history', () => {
         const { commands, history, edit, sheet } = createTestBed();
-        commands.syncExecuteCommand(AddRangeProtectionMutation.id, { ...protectionMutations[0].params });
+        commands.syncExecuteCommand(AddRangeProtectionMutation.id, { ...protectionMutations[0].params }, { fromCollab: true });
         expect(edit('after protection')).toBe(true);
         expect(history.getUndoRedoStatus('test')).toEqual({ undos: 1, redos: 0 });
         expect(commands.syncExecuteCommand(UndoCommand.id)).toBe(true);
@@ -147,7 +156,7 @@ describe('protection history boundary', () => {
 
     it('preserves undo/redo when restoring an existing protection range', () => {
         const { commands, history, get } = createTestBed();
-        commands.syncExecuteCommand(AddRangeProtectionMutation.id, { ...protectionMutations[0].params });
+        commands.syncExecuteCommand(AddRangeProtectionMutation.id, { ...protectionMutations[0].params }, { fromCollab: true });
         commands.syncExecuteCommand(DeleteRangeProtectionMutation.id, {
             unitId: 'test',
             subUnitId: 'sheet1',
@@ -171,7 +180,7 @@ describe('protection history boundary', () => {
 
     it('does not clear history when worksheet protection is removed', () => {
         const { commands, history, get, edit } = createTestBed();
-        commands.syncExecuteCommand(AddWorksheetProtectionMutation.id, { ...protectionMutations[1].params });
+        commands.syncExecuteCommand(AddWorksheetProtectionMutation.id, { ...protectionMutations[1].params }, { fromCollab: true });
         edit('allowed edit');
         commands.syncExecuteCommand(DeleteWorksheetProtectionMutation.id, { unitId: 'test', subUnitId: 'sheet1' });
         expect(get(WorksheetProtectionRuleModel).getRule('test', 'sheet1')).toBeUndefined();
@@ -184,7 +193,8 @@ describe('protection history boundary', () => {
             const isRange = rule.unitType === UnitObject.SelectRange;
             commands.syncExecuteCommand(
                 isRange ? AddRangeProtectionMutation.id : AddWorksheetProtectionMutation.id,
-                { unitId: 'test', subUnitId: 'sheet1', rule, rules: [rule] }
+                { unitId: 'test', subUnitId: 'sheet1', rule, rules: [rule] },
+                { fromCollab: true }
             );
             const point = isRange
                 ? new RangeProtectionPermissionEditPoint('test', 'sheet1', rule.permissionId)
