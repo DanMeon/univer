@@ -32,14 +32,22 @@ Pushing a `v*-carenode.*` tag runs, on the runner and toolchain of upstream's `r
 1. layer 1 — build the upstream tag unmodified, pack the selected packages, and compare every file with the official
    `@univerjs/<x>@<upstream>` tarballs (`compare-official.mts --mode exact`); any difference fails;
 2. fork build — `set-version.mts` (version into every workspace package, before the build bakes it into the
-   bundles), install, build, `select-packages.mts`, `rename-packages.mts` (after the build), `pack-packages.mts`,
-   `check-packs.mts`, and layer 2 — compare with the official tarballs, allowing only the differences listed at the
-   top of `compare-official.mts`;
-3. for `N >= 1`, stage the tarballs on npm through trusted publishing (`publish.sh stage`). Nothing is public until a
-   maintainer approves the staged versions with 2FA. `N = 0` only leaves the tarballs as the run's `univer-<version>`
-   artifact.
+   bundles), install, build, `select-packages.mts`, `rename-packages.mts` (after the build; the README notice lists
+   the changed source files, tests excluded since they are not packed), `pack-packages.mts`, `check-packs.mts`, and
+   layer 2 — compare with the official tarballs, allowing only the differences listed at the top of
+   `compare-official.mts`;
+3. for `N >= 1`, previous release — `compare-previous.mts` downloads `<base>-carenode.<N-1>` from npm and compares
+   the build with it file by file: besides the version, chunk names and the README notice, built code may differ
+   only in the modules (and declaration files) of source files changed since tag `v<base>-carenode.<N-1>`; derived
+   files (import and export blocks, the UMD bundle, the Tailwind CSS) may differ only in such a package. Anything
+   else fails the run. The previous release must be public;
+4. for `N >= 1`, once steps 1 to 3 pass, stage the tarballs on npm through trusted publishing (`publish.sh stage`).
+   Nothing is public until a maintainer approves the staged versions with 2FA. `N = 0` only leaves the tarballs as
+   the run's `univer-<version>` artifact.
 
-A manual run (`workflow_dispatch` with a version) does steps 1 and 2 only.
+A manual run (`workflow_dispatch` with a version) does steps 1 to 3 (step 3 for `N >= 1`) and never stages.
+`compare-previous.mts --previous <dir>` without `--download` compares with a downloaded `univer-<version>` artifact
+instead, for a check on a maintainer's machine before the previous release is public.
 
 ## Publishing by hand
 

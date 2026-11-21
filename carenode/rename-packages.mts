@@ -1,7 +1,7 @@
 // Give the selected packages their fork identity, after the build and only in the working tree:
 // name, description, repository/homepage/bugs, a keyword, internal dependencies as workspace aliases
 // (pnpm packs them as `npm:@danmeon/univer-<y>@<version>`), and a fork notice at the top of the README
-// that lists the source files changed from the upstream tag.
+// that lists the source files changed from the upstream tag (tests excluded: they are not packed).
 //
 // Renaming must come after the build: the build keeps a facade's own package name external and
 // writes `name` into the bundles (see the Carenode fork notes in the consumer repository).
@@ -22,6 +22,7 @@ import {
     FORK_NOTICE_START,
     FORK_REPOSITORY,
     FORK_REPOSITORY_URL,
+    isTestSource,
     log,
     parseForkVersion,
     readJson,
@@ -72,9 +73,10 @@ for (const pkg of selection.packages) {
         fs.copyFileSync('LICENSE', path.join(pkg.dir, 'LICENSE'));
     }
 
+    // Tests are not packed, so only the shipped source counts (see isTestSource).
     const changedFiles = run('git', ['diff', '--name-only', target.baseTag, 'HEAD', '--', `${pkg.dir}/src`])
         .split('\n')
-        .filter(Boolean);
+        .filter((file) => file && !isTestSource(file));
     pkg.changedFiles = changedFiles;
     const changes = changedFiles.length === 0
         ? `Source files changed from upstream \`${target.baseTag}\` in this package: none. Only the package name, version and this notice differ; the code was rebuilt from the upstream source.`

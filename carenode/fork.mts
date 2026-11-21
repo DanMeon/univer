@@ -150,6 +150,44 @@ export function listFiles(dir: string): string[] {
         .sort();
 }
 
+/**
+ * Whether a changed file under a package's `src` is a test (a `__tests__` directory, `*.spec.*`, `*.test.*`). Tests are
+ * not built into the tarball, so they are not listed as the package's changed source and do not count as a source
+ * change when tarballs are compared.
+ */
+export function isTestSource(file: string): boolean {
+    return /(?:^|\/)__tests__\//.test(file) || /\.(?:spec|test)\.[cm]?[jt]sx?$/.test(file);
+}
+
+/**
+ * Pair files that exist on one side only and differ only by the content hash in their name: same directory,
+ * same stem, same extension, exactly one candidate on each side. Ambiguous names stay unpaired (and fail).
+ * `renames` maps the `b` file to its `a` file, `hashes` the `b` hash to the `a` hash.
+ */
+export function pairHashedChunks(onlyA: string[], onlyB: string[]): { renames: Map<string, string>; hashes: [string, string][] } {
+    const pattern = /^(.*)-([\w-]{8})(\.[a-z.]+)$/;
+    const group = (files: string[]): Map<string, { file: string; hash: string }[]> => {
+        const groups = new Map<string, { file: string; hash: string }[]>();
+        for (const file of files) {
+            const match = pattern.exec(file);
+            if (!match) continue;
+            const key = `${match[1]}${match[3]}`;
+            groups.set(key, [...(groups.get(key) ?? []), { file, hash: match[2] }]);
+        }
+        return groups;
+    };
+    const groupsA = group(onlyA);
+    const renames = new Map<string, string>();
+    const hashes = new Map<string, string>();
+    for (const [key, candidatesB] of group(onlyB)) {
+        const candidatesA = groupsA.get(key) ?? [];
+        if (candidatesB.length !== 1 || candidatesA.length !== 1) continue;
+        renames.set(candidatesB[0].file, candidatesA[0].file);
+        hashes.set(candidatesB[0].hash, candidatesA[0].hash);
+    }
+    return { renames, hashes: [...hashes] };
+}
+
 /** Print one line of tool output to stdout (the job log). */
 export function log(line: string): void {
     process.stdout.write(`${line}\n`);

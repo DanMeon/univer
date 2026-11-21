@@ -37,6 +37,7 @@ import {
     IDENTITY_FIELDS,
     listFiles,
     log,
+    pairHashedChunks,
     parseForkVersion,
     readJson,
     run,
@@ -177,34 +178,6 @@ for (const pkg of selection.packages) {
         }
     }
     results.push(result);
-}
-
-/**
- * Pair files that exist on one side only and differ only by the content hash in their name: same directory,
- * same stem, same extension, exactly one candidate on each side. Ambiguous names stay unpaired (and fail).
- */
-function pairHashedChunks(onlyOfficial: string[], onlyBuilt: string[]): { renames: Map<string, string>; hashes: [string, string][] } {
-    const pattern = /^(.*)-([\w-]{8})(\.[a-z.]+)$/;
-    const group = (files: string[]): Map<string, { file: string; hash: string }[]> => {
-        const groups = new Map<string, { file: string; hash: string }[]>();
-        for (const file of files) {
-            const match = pattern.exec(file);
-            if (!match) continue;
-            const key = `${match[1]}${match[3]}`;
-            groups.set(key, [...(groups.get(key) ?? []), { file, hash: match[2] }]);
-        }
-        return groups;
-    };
-    const officialGroups = group(onlyOfficial);
-    const renames = new Map<string, string>();
-    const hashes = new Map<string, string>();
-    for (const [key, builtCandidates] of group(onlyBuilt)) {
-        const officialCandidates = officialGroups.get(key) ?? [];
-        if (builtCandidates.length !== 1 || officialCandidates.length !== 1) continue;
-        renames.set(builtCandidates[0].file, officialCandidates[0].file);
-        hashes.set(builtCandidates[0].hash, officialCandidates[0].hash);
-    }
-    return { renames, hashes: [...hashes] };
 }
 
 function note(result: IPackageResult, allowedAsChangedSource: boolean, difference: IDifference): void {
