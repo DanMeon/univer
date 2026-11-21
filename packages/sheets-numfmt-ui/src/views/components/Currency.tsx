@@ -15,8 +15,9 @@
  */
 
 // Modified by Carenode, 2026 — the currency panel starts at no decimals on a cell without a format (xlsxkit currency-panel-decimal-0)
+// Modified by Carenode, 2026 — the currency panel matches the negative line with the panel's own format match (xlsxkit panel-negative-match)
 
-import { isPatternEqualWithoutDecimal, LocaleService } from '@univerjs/core';
+import { LocaleService } from '@univerjs/core';
 import { InputNumber, Select, SelectList } from '@univerjs/design';
 import {
     getCurrencyFormatOptions,
@@ -29,6 +30,7 @@ import { useContext, useLayoutEffect, useMemo, useState } from 'react';
 import type { LocaleKey } from '../../locale/types';
 import type { IBusinessComponentProps } from './interface';
 import { UserHabitCurrencyContext } from '../../controllers/user-habit.controller';
+import { xlsxkitIsSamePanelPattern } from './xlsxkit-panel-pattern';
 
 export const isCurrencyPanel = (pattern: string) => {
     const type = getCurrencyType(pattern);
@@ -45,8 +47,10 @@ export function CurrencyPanel(props: IBusinessComponentProps) {
     const [decimal, setDecimal] = useState(() => getDecimalFromPattern(props.defaultPattern || '', 0));
     const [pattern, setPattern] = useState(() => {
         const negativeOptions = getCurrencyFormatOptions(suffix);
+        // Carenode xlsxkit panel-negative-match: the cell's negative style picks the line (upstream:
+        // `isPatternEqualWithoutDecimal`).
         const pattern =
-            negativeOptions.find((item) => isPatternEqualWithoutDecimal(item.value, props.defaultPattern))?.value ||
+            negativeOptions.find((item) => xlsxkitIsSamePanelPattern(item.value, props.defaultPattern))?.value ||
             negativeOptions[0].value;
         return pattern;
     });

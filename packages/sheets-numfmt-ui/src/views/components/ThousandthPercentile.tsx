@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-import type { LocaleKey } from '../../locale/types';
-import type { IBusinessComponentProps } from './interface';
-import { isPatternEqualWithoutDecimal, LocaleService } from '@univerjs/core';
+// Modified by Carenode, 2026 — the thousands panel matches its lines with the panel's own format match (xlsxkit panel-negative-match)
+
+import { LocaleService } from '@univerjs/core';
 import { InputNumber, SelectList } from '@univerjs/design';
 import {
     getDecimalFromPattern,
@@ -26,9 +26,13 @@ import {
 } from '@univerjs/sheets-numfmt';
 import { useDependency } from '@univerjs/ui';
 import { useLayoutEffect, useMemo, useState } from 'react';
+import type { LocaleKey } from '../../locale/types';
+import type { IBusinessComponentProps } from './interface';
+import { xlsxkitIsSamePanelPattern } from './xlsxkit-panel-pattern';
 
+// Carenode xlsxkit panel-negative-match: whether a format is a thousands-separator line, and below the line it opens on.
 export const isThousandthPercentilePanel = (pattern: string) =>
-    getNumberFormatOptions().some((item) => isPatternEqualWithoutDecimal(item.value, pattern));
+    getNumberFormatOptions().some((item) => xlsxkitIsSamePanelPattern(item.value, pattern));
 
 export function ThousandthPercentilePanel(props: IBusinessComponentProps) {
     const { onActionChange, onChange } = props;
@@ -38,7 +42,7 @@ export function ThousandthPercentilePanel(props: IBusinessComponentProps) {
     const [decimal, setDecimal] = useState(() => getDecimalFromPattern(props.defaultPattern || '', 0));
 
     const [suffix, setSuffix] = useState(() => {
-        const item = options.find((item) => isPatternEqualWithoutDecimal(item.value, props.defaultPattern || ''));
+        const item = options.find((item) => xlsxkitIsSamePanelPattern(item.value, props.defaultPattern || ''));
         return item?.value || options[0].value;
     });
 
