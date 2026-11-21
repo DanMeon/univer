@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-4497 excel-line-height: place an overflowing sheet document cell block like bottom alignment.
+
 import type {
     ICustomRange,
     IDisposable,
@@ -65,6 +67,7 @@ import { DocumentSkeletonPageType, GlyphType, LineType } from '../../basics/i-do
 import { VERTICAL_ROTATE_ANGLE } from '../../basics/text-rotation';
 import { degToRad, fixLineWidthByScale } from '../../basics/tools';
 import { Vector2 } from '../../basics/vector2';
+import { SHEET_FONT_DOCUMENTS_OBJECT_KEY, xlsxkitCellBlockTop } from '../../basics/xlsxkit-excel-line-height';
 import { DrawingGroupObject } from '../../drawing-group';
 import { DocumentsSpanAndLineExtensionRegistry } from '../extension';
 import { DocComponent } from './doc-component';
@@ -508,12 +511,16 @@ export class Documents extends DocComponent {
                 centerAngleDeg,
                 cellValueType
             );
-            const verticalOffsetNoAngle = this._verticalHandler(
+            let verticalOffsetNoAngle = this._verticalHandler(
                 actualHeight,
                 pagePaddingTop,
                 pagePaddingBottom,
                 verticalAlign
             );
+            if (this.oKey === SHEET_FONT_DOCUMENTS_OBJECT_KEY) {
+                // Carenode CNT-4497 excel-line-height: sheet document cells place an overflowing block like plain cell text.
+                verticalOffsetNoAngle = xlsxkitCellBlockTop(verticalOffsetNoAngle, actualHeight, pagePaddingTop, this.height - pagePaddingTop - pagePaddingBottom, pagePaddingBottom, verticalAlign);
+            }
 
             const alignOffsetNoAngle = Vector2.create(horizontalOffsetNoAngle, verticalOffsetNoAngle);
             const centerAngle = degToRad(centerAngleDeg);

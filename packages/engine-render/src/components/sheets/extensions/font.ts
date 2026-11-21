@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-4497 excel-line-height: pass the cell bottom padding to clipped cell text.
+
 import type {
     ICellDataForSheetInterceptor,
     ICellWithCoord,
@@ -751,6 +753,7 @@ export class Font extends SheetExtension {
             height: cellHeight,
             left: paddingLeft,
             top: paddingTop,
+            xlsxkitPaddingBottom: paddingBottom, // Carenode CNT-4497 excel-line-height
             color: fontCache.style?.cl?.rgb,
             strokeLine: Boolean(fontCache.style?.st?.s),
             underline: Boolean(fontCache.style?.ul?.s),

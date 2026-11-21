@@ -14,11 +14,14 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-4497 excel-line-height: place an overflowing cell text block like bottom alignment.
+
 import type { Nullable } from '@univerjs/core';
 import { CellValueType, HorizontalAlign, TextDecoration, VerticalAlign } from '@univerjs/core';
 import type { UniverRenderingContext } from '../context';
 import type { IShapeProps } from './shape';
 import { COLOR_BLACK_RGB } from '../basics/const';
+import { xlsxkitCellBlockTop } from '../basics/xlsxkit-excel-line-height';
 import { DocSimpleSkeleton } from '../components/docs/layout/doc-simple-skeleton';
 import { FontCache } from '../components/docs/layout/shaping-engine/font-cache';
 import { Shape } from './shape';
@@ -37,6 +40,11 @@ export interface ITextProps extends IShapeProps {
     underline?: boolean;
     underlineType?: TextDecoration;
     cellValueType?: Nullable<CellValueType>;
+    /**
+     * Carenode CNT-4497 excel-line-height: the bottom padding of the sheet cell being drawn. Only the sheet's
+     * clipped cell text path passes it; a block that overflows the padded box is then placed by xlsxkitCellBlockTop.
+     */
+    xlsxkitPaddingBottom?: number;
 }
 
 export const TEXT_OBJECT_ARRAY = [
@@ -95,6 +103,9 @@ export class Text extends Shape<ITextProps> {
         const totalHeight = cachedLayout?.totalHeight ?? skeleton!.getTotalHeight();
         const offsetY = vAlign === VerticalAlign.TOP ? 0 : vAlign === VerticalAlign.MIDDLE ? (height - totalHeight) / 2 : height - totalHeight;
         let lineTop = top + offsetY;
+        if (props.xlsxkitPaddingBottom !== undefined) {
+            lineTop = xlsxkitCellBlockTop(lineTop, totalHeight, top, height, props.xlsxkitPaddingBottom, vAlign); // Carenode CNT-4497 excel-line-height
+        }
 
         // Set font once outside the loop for better performance
         ctx.save();
@@ -170,6 +181,9 @@ export class Text extends Shape<ITextProps> {
         const { lines, totalHeight } = cachedLayout;
         const offsetY = vAlign === VerticalAlign.TOP ? 0 : vAlign === VerticalAlign.MIDDLE ? (height - totalHeight) / 2 : height - totalHeight;
         let lineTop = top + offsetY;
+        if (props.xlsxkitPaddingBottom !== undefined) {
+            lineTop = xlsxkitCellBlockTop(lineTop, totalHeight, top, height, props.xlsxkitPaddingBottom, vAlign); // Carenode CNT-4497 excel-line-height
+        }
 
         ctx.font = fontStyle;
         ctx.fillStyle = props.color ?? COLOR_BLACK_RGB;

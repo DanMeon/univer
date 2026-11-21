@@ -15,6 +15,7 @@
  */
 
 // Modified by Carenode, 2026 — CNT-3201: scroll cache source offsets stay logical pixels.
+// Modified by Carenode, 2026 — CNT-4497 excel-line-height: the sheet document instance key comes from xlsxkit-excel-line-height.ts.
 
 import type { IPosition, IRange, Nullable } from '@univerjs/core';
 import { BooleanNumber, sortRules, Tools } from '@univerjs/core';
@@ -31,6 +32,7 @@ import type { IPaintForRefresh, IPaintForScrolling } from './interfaces';
 import type { SpreadsheetSkeleton } from './sheet.render-skeleton';
 import { BORDER_TYPE, FIX_ONE_PIXEL_BLUR_OFFSET, RENDER_CLASS_TYPE } from '../../basics/const';
 import { getColor } from '../../basics/tools';
+import { SHEET_FONT_DOCUMENTS_OBJECT_KEY } from '../../basics/xlsxkit-excel-line-height';
 import { Canvas } from '../../canvas';
 import { Documents } from '../docs/document';
 import { FontCache } from '../docs/layout/shaping-engine/font-cache';
@@ -41,7 +43,7 @@ import { SHEET_EXTENSION_PREFIX, SHEET_EXTENSION_TYPE } from './extensions/sheet
 import { SHEET_VIEWPORT_KEY } from './interfaces';
 import { SheetComponent } from './sheet-component';
 
-const OBJECT_KEY = '__SHEET_EXTENSION_FONT_DOCUMENT_INSTANCE__';
+const OBJECT_KEY = SHEET_FONT_DOCUMENTS_OBJECT_KEY; // Carenode CNT-4497 excel-line-height: Documents.draw checks the key
 const MERGE_REPAIR_CACHE_REFRESH_RATIO = 0.6;
 const SCROLL_REPAIR_INK_HALO = 2;
 const BORDER_INK_HALO = 2;

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-4497 excel-line-height: auto row heights ask the Carenode resolver.
+
 import type {
     BorderStyleTypes,
     IBorderStyleData,
@@ -68,12 +70,14 @@ import { distinctUntilChanged, startWith } from 'rxjs';
 import type { IDocumentSkeletonColumn } from '../../basics/i-document-skeleton-cached';
 import type { ITransformChangeState } from '../../basics/interfaces';
 import type { IBoundRectNoAngle, IPoint, IViewportInfo } from '../../basics/vector2';
+import type { IXlsxkitAutoRowHeightResolver, IXlsxkitCellProbeKind } from '../../basics/xlsxkit-excel-line-height';
 import type { Scene } from '../../scene';
 import type { IBorderCache, IFontCacheItem, IStylesCache } from './interfaces';
 import { BORDER_TYPE, COLOR_BLACK_RGB, FIX_ONE_PIXEL_BLUR_OFFSET, MAXIMUM_COL_WIDTH, MAXIMUM_ROW_HEIGHT, MIN_COL_WIDTH } from '../../basics/const';
 import { getRotateOffsetAndFarthestHypotenuse } from '../../basics/draw';
 import { convertTextRotation, VERTICAL_ROTATE_ANGLE } from '../../basics/text-rotation';
 import { degToRad, getFontStyleString } from '../../basics/tools';
+import { XLSXKIT_AUTO_ROW_HEIGHT_RESOLVER_CONFIG_KEY } from '../../basics/xlsxkit-excel-line-height';
 import { Text } from '../../shape/text';
 import { DocSimpleSkeleton } from '../docs/layout/doc-simple-skeleton';
 import { DocumentSkeleton } from '../docs/layout/doc-skeleton';
@@ -751,7 +755,8 @@ export class SpreadsheetSkeleton extends SheetSkeleton {
                         for (let colIndex = startColumn; colIndex <= endColumn; colIndex++) {
                             const autoHeight = currentCellHeights.getValue(rowIndex, colIndex) ?? 0;
                             maxPrev = Math.max(maxPrev, autoHeight);
-                            const currentHeight = this.calculateAutoHeightForCell(rowIndex, colIndex) ?? this._worksheetData.defaultRowHeight;
+                            // Carenode CNT-4497 excel-line-height: an empty cell counts as the row floor.
+                            const currentHeight = this.calculateAutoHeightForCell(rowIndex, colIndex) ?? this._xlsxkitRowFloor(this._worksheetData.defaultRowHeight);
                             maxCurrent = Math.max(maxCurrent, currentHeight);
                         }
 
@@ -876,10 +881,16 @@ export class SpreadsheetSkeleton extends SheetSkeleton {
                     l * Math.sin(absAngleInRad);
             }
 
-            return h;
+            // Carenode CNT-4497 excel-line-height
+            return this._xlsxkitCellAutoHeight(row, col, h, {
+                kind: 'document',
+                rotated: Boolean(vertexAngle || centerAngle),
+                pages: documentSkeleton.getSkeletonData()!.pages,
+            });
         } else {
             if (cell?.v === undefined || cell?.v === null) {
-                return undefined;
+                // Carenode CNT-4497 excel-line-height: a styled empty cell counts as one line of its font.
+                return cell == null ? undefined : this._xlsxkitCellAutoHeight(row, col, undefined, { kind: 'empty', font: getFontStyleString(style) });
             }
             const paddingLeft = style.pd?.l ?? DEFAULT_PADDING_DATA.l;
             const paddingRight = style.pd?.r ?? DEFAULT_PADDING_DATA.r;
@@ -895,20 +906,30 @@ export class SpreadsheetSkeleton extends SheetSkeleton {
                     Infinity,
                     this.textLineGap
                 );
-                skeleton.calculate();
-                return skeleton.getTotalHeight() + paddingTop + paddingBottom;
+                const lines = skeleton.calculate();
+                // Carenode CNT-4497 excel-line-height
+                return this._xlsxkitCellAutoHeight(row, col, skeleton.getTotalHeight() + paddingTop + paddingBottom, {
+                    kind: 'text',
+                    font: getFontStyleString(style),
+                    lineCount: lines.length,
+                });
             } else {
                 // For same fontStyle, the height of the text is fixed.
                 // So we can use a fixed text to calculate the height to make a speed up.
                 const textSize = FontCache.getMeasureText('A', getFontStyleString(style).fontCache);
-                return textSize.fontBoundingBoxAscent + textSize.fontBoundingBoxDescent + paddingTop + paddingBottom;
+                // Carenode CNT-4497 excel-line-height
+                return this._xlsxkitCellAutoHeight(row, col, textSize.fontBoundingBoxAscent + textSize.fontBoundingBoxDescent + paddingTop + paddingBottom, {
+                    kind: 'text',
+                    font: getFontStyleString(style),
+                    lineCount: 1,
+                });
             }
         }
     }
 
     private _calculateRowAutoHeight(rowNum: number): number {
         const { columnCount, defaultRowHeight } = this._worksheetData;
-        let height = defaultRowHeight;
+        let height = this._xlsxkitRowFloor(defaultRowHeight); // Carenode CNT-4497 excel-line-height
 
         for (let i = 0; i < columnCount; i++) {
             const cellHeight = this.calculateAutoHeightForCell(rowNum, i);
@@ -918,6 +939,33 @@ export class SpreadsheetSkeleton extends SheetSkeleton {
         }
 
         return Math.min(height, MAXIMUM_ROW_HEIGHT);
+    }
+
+    /**
+     * Carenode CNT-4497 excel-line-height: the height an auto-fit cell takes comes from the resolver Carenode registers
+     * (see xlsxkit-excel-line-height.ts); with none registered, or when it answers undefined, it stays the upstream one.
+     */
+    private _xlsxkitCellAutoHeight(row: number, col: number, upstreamHeight: number | undefined, probe: IXlsxkitCellProbeKind): number | undefined {
+        const resolver = this._configService.getConfig<IXlsxkitAutoRowHeightResolver>(XLSXKIT_AUTO_ROW_HEIGHT_RESOLVER_CONFIG_KEY);
+        if (!resolver) {
+            return upstreamHeight;
+        }
+        const mergeInfo = this.worksheet.getCellInfoInMergeData(row, col);
+        const height = resolver.cellHeight({
+            ...probe,
+            unitId: this.worksheet.getUnitId(),
+            row,
+            col,
+            merged: Boolean(mergeInfo.isMerged || mergeInfo.isMergedMainCell),
+        });
+        return typeof height === 'number' ? height : upstreamHeight;
+    }
+
+    /** Carenode CNT-4497 excel-line-height: the height an auto-fit row never drops below. */
+    private _xlsxkitRowFloor(defaultRowHeight: number): number {
+        const resolver = this._configService.getConfig<IXlsxkitAutoRowHeightResolver>(XLSXKIT_AUTO_ROW_HEIGHT_RESOLVER_CONFIG_KEY);
+        const floor = resolver?.rowFloor({ unitId: this.worksheet.getUnitId(), defaultRowHeight });
+        return typeof floor === 'number' ? floor : defaultRowHeight;
     }
     //#endregion
 
