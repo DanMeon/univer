@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — provides IPermissionService to WorksheetProtectionRenderController (xlsxkit worksheet-shadow-sheet-state)
+
 import type { IRenderContext } from '@univerjs/engine-render';
 import { IConfigService, Injector, IPermissionService, ThemeService } from '@univerjs/core';
 import { IRenderManagerService } from '@univerjs/engine-render';
@@ -115,6 +117,7 @@ describe('permission render controllers', () => {
             [SheetSkeletonManagerService, { useValue: skeletonManagerService }],
             [WorksheetProtectionRuleModel, { useValue: { worksheetRuleInitStateChange$ } }],
             [IConfigService, { useValue: { getConfig: () => ({ protectedRangeShadow: 'always' }) } }],
+            [IPermissionService, { useValue: {} }],
         ]);
         const controller = injector.createInstance(WorksheetProtectionRenderController, { unitId: 'unit-1', mainComponent: spreadsheet } as unknown as IRenderContext);
 
@@ -138,6 +141,7 @@ describe('permission render controllers', () => {
             [SheetSkeletonManagerService, { useValue: { reCalculate: vi.fn() } }],
             [WorksheetProtectionRuleModel, { useValue: { worksheetRuleInitStateChange$: new Subject() } }],
             [IConfigService, { useValue: { getConfig: () => ({ protectedRangeShadow: 'none' }) } }],
+            [IPermissionService, { useValue: {} }],
         ]);
         const disabledController = disabledInjector.createInstance(WorksheetProtectionRenderController, { unitId: 'unit-1', mainComponent: disabledSpreadsheet } as unknown as IRenderContext);
 

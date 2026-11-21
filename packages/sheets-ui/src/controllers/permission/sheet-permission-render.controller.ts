@@ -14,13 +14,17 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — hands the worksheet shade a reader of the sheet's own protection state (xlsxkit worksheet-shadow-sheet-state)
+
 import type { IRenderContext, IRenderModule, Spreadsheet } from '@univerjs/engine-render';
 import type { MenuConfig } from '@univerjs/ui';
 import { Disposable, IConfigService, Inject, IPermissionService, ThemeService } from '@univerjs/core';
 import { IRenderManagerService } from '@univerjs/engine-render';
-import { RangeProtectionRuleModel, WorksheetProtectionRuleModel } from '@univerjs/sheets';
+import { UnitAction } from '@univerjs/protocol';
+import { RangeProtectionRuleModel, WorksheetEditPermission, WorksheetProtectionRuleModel, WorksheetViewPermission } from '@univerjs/sheets';
 import { merge, skip, throttleTime } from 'rxjs';
 import type { IUniverSheetsUIConfig } from '../../config/config';
+import type { XlsxkitSheetProtectionReader } from '../../views/permission/extensions/worksheet-permission.render';
 import { convertToShadowStrategy, SHEETS_UI_PLUGIN_CONFIG_KEY } from '../../config/config';
 import { SheetSkeletonManagerService } from '../../services/sheet-skeleton-manager.service';
 import {
@@ -110,7 +114,8 @@ export class WorksheetProtectionRenderController extends Disposable implements I
         @Inject(SheetSkeletonManagerService) private _sheetSkeletonManagerService: SheetSkeletonManagerService,
         @Inject(WorksheetProtectionRuleModel) private _worksheetProtectionRuleModel: WorksheetProtectionRuleModel,
         @Inject(IConfigService) private _configService: IConfigService,
-        @Inject(ThemeService) private readonly _themeService: ThemeService
+        @Inject(ThemeService) private readonly _themeService: ThemeService,
+        @IPermissionService private readonly _permissionService: IPermissionService
     ) {
         super();
 
@@ -120,7 +125,7 @@ export class WorksheetProtectionRenderController extends Disposable implements I
         const shadowStrategy = convertToShadowStrategy(config?.protectedRangeShadow);
 
         // Create render extension with the shadow strategy
-        this._worksheetProtectionRenderExtension = new WorksheetProtectionRenderExtension(this._themeService, shadowStrategy);
+        this._worksheetProtectionRenderExtension = new WorksheetProtectionRenderExtension(this._themeService, shadowStrategy, this._readSheetProtection);
 
         this._initSkeleton();
         if (shadowStrategy === 'none') {
@@ -129,6 +134,19 @@ export class WorksheetProtectionRenderController extends Disposable implements I
 
         this._initRender();
     }
+
+    // Carenode xlsxkit worksheet-shadow-sheet-state: the sheet's state the shade reads, the same rule and points the
+    // sheets view model's sheet interceptor reads.
+    private readonly _readSheetProtection: XlsxkitSheetProtectionReader = (unitId, subUnitId) => {
+        if (!this._worksheetProtectionRuleModel.getRule(unitId, subUnitId)?.permissionId) {
+            return null;
+        }
+
+        return {
+            [UnitAction.View]: this._permissionService.getPermissionPoint(new WorksheetViewPermission(unitId, subUnitId).id)?.value ?? false,
+            [UnitAction.Edit]: this._permissionService.getPermissionPoint(new WorksheetEditPermission(unitId, subUnitId).id)?.value ?? false,
+        };
+    };
 
     private _initRender() {
         const renderId = this._context.unitId;

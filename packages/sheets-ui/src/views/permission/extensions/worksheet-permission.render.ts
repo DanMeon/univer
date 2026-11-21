@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — whole-sheet protection shade reads the sheet's own state (xlsxkit worksheet-shadow-sheet-state)
+
 import type { IScale, ThemeService } from '@univerjs/core';
 import type { SpreadsheetSkeleton, UniverRenderingContext } from '@univerjs/engine-render';
-import type { IWorksheetProtectionRenderCellData } from '@univerjs/sheets';
 import { SheetExtension } from '@univerjs/engine-render';
 import { UnitAction } from '@univerjs/protocol';
 import { base64 } from './protect-background-img';
@@ -24,6 +25,18 @@ import { base64 } from './protect-background-img';
 export const worksheetProtectionKey = 'worksheet-protection';
 const EXTENSION_CAN_VIEW_Z_INDEX = 25;
 const EXTENSION_CAN_NOT_VIEW_Z_INDEX = 80;
+
+/**
+ * Carenode xlsxkit worksheet-shadow-sheet-state: a sheet's view and edit points, the values the sheets view model's
+ * sheet interceptor writes into every cell of a sheet with a rule.
+ */
+export interface IXlsxkitSheetProtectionState {
+    [UnitAction.View]: boolean;
+    [UnitAction.Edit]: boolean;
+}
+
+/** Reads a sheet's protection state; `null` when the sheet has no rule. */
+export type XlsxkitSheetProtectionReader = (unitId: string, subUnitId: string) => IXlsxkitSheetProtectionState | null;
 
 export class WorksheetProtectionRenderExtension extends SheetExtension {
     override readonly viewportCacheReusable = this.constructor === WorksheetProtectionRenderExtension;
@@ -38,7 +51,8 @@ export class WorksheetProtectionRenderExtension extends SheetExtension {
 
     constructor(
         private readonly _themeService: ThemeService,
-        shadowStrategy?: 'always' | 'non-editable' | 'non-viewable' | 'none'
+        shadowStrategy: 'always' | 'non-editable' | 'non-viewable' | 'none' | undefined,
+        private readonly _readSheetProtection: XlsxkitSheetProtectionReader
     ) {
         super();
         this._img.onload = () => {
@@ -71,41 +85,40 @@ export class WorksheetProtectionRenderExtension extends SheetExtension {
         const start = spreadsheetSkeleton.getCellWithCoordByIndex(startRow, startColumn, false);
         const end = spreadsheetSkeleton.getCellWithCoordByIndex(endRow, endColumn, false);
 
-        const { hasWorksheetRule = false, selectionProtection = [] } = worksheet.getCell(startRow, startColumn) as IWorksheetProtectionRenderCellData || {};
+        // Carenode xlsxkit worksheet-shadow-sheet-state: whether the whole sheet is shaded, and on which layer, is the
+        // sheet's own state — its rule and its view and edit points. Upstream read both off the top-left visible cell
+        // (`hasWorksheetRule`, `selectionProtection[0]`), which stands for the sheet only while a sheet rule overwrites
+        // every cell's protection: once a cell keeps its range rule (the sheets fork commit `xlsxkit protection-merge`)
+        // a locked top-left cell shaded an editable sheet and the shade came and went with the scroll, and a cell a range
+        // rule hides holds no sheet state at all (the range interceptor stops there) — the sheet's shade on that cell's
+        // layer covered the text of a sheet people may view.
+        const sheetProtection = this._readSheetProtection(worksheet.getUnitId(), worksheet.getSheetId());
         if (!this._pattern) {
             ctx.restore();
             return;
         }
 
-        if (selectionProtection.length > 0) {
-            const cellProtectionConfig = selectionProtection[0];
-            const viewPermission = cellProtectionConfig?.[UnitAction.View];
-            if (viewPermission) {
-                this.setZIndex(EXTENSION_CAN_VIEW_Z_INDEX);
-            } else {
-                this.setZIndex(EXTENSION_CAN_NOT_VIEW_Z_INDEX);
-            }
+        if (sheetProtection !== null) {
+            this.setZIndex(sheetProtection[UnitAction.View] ? EXTENSION_CAN_VIEW_Z_INDEX : EXTENSION_CAN_NOT_VIEW_Z_INDEX);
         }
 
         ctx.fillStyle = this._pattern;
 
         // Apply shadow strategy for worksheet protection
-        let shouldRenderShadow = hasWorksheetRule;
+        let shouldRenderShadow = sheetProtection !== null;
 
         // If strategy is 'none', never show shadow
         if (this._shadowStrategy === 'none') {
             shouldRenderShadow = false;
-        } else if (hasWorksheetRule && selectionProtection.length > 0) {
-            const cellProtectionConfig = selectionProtection[0];
-
+        } else if (sheetProtection !== null) {
             if (this._shadowStrategy === 'non-editable') {
                 // Only show shadow if edit permission is false
-                shouldRenderShadow = cellProtectionConfig?.[UnitAction.Edit] === false;
+                shouldRenderShadow = sheetProtection[UnitAction.Edit] === false;
             } else if (this._shadowStrategy === 'non-viewable') {
                 // Only show shadow if view permission is false
-                shouldRenderShadow = cellProtectionConfig?.[UnitAction.View] === false;
+                shouldRenderShadow = sheetProtection[UnitAction.View] === false;
             }
-            // For 'always' strategy, shouldRenderShadow remains true (hasWorksheetRule)
+            // For 'always' strategy, shouldRenderShadow remains true (the sheet has a rule)
         }
 
         if (shouldRenderShadow) {
