@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — a formula value also passes the target cells' edit check (xlsxkit formula-target-check)
+
 import type {
     ICellData,
     ICellDataForSheetInterceptor,
@@ -274,19 +276,22 @@ export class SheetPermissionCheckController extends Disposable {
             case SetRangeValuesCommand.id:
                 params = commandInfo.params as ISetRangeValuesCommandParams;
 
-                if (isICellData(params.value) && params.value.f) {
+                // Carenode xlsxkit formula-target-check: a formula goes into the target cells like any value, so it first
+                // passes the check and gets the refusal a plain value gets. Upstream asked a formula only whether its
+                // references may be viewed, so a formula filled with Ctrl+Enter over a selection holding a locked cell went
+                // into the locked cell.
+                permission = this._permissionCheckBySetRangeValue(
+                    {
+                        workbookTypes: [WorkbookEditablePermission],
+                        worksheetTypes: [WorksheetSetCellValuePermission, WorksheetEditPermission],
+                        rangeTypes: [RangeProtectionPermissionEditPoint],
+                    },
+                    params
+                );
+                errorMsg = this._localeService.t<LocaleKey>('sheets.permission.dialog.editErr');
+                if (permission && isICellData(params.value) && params.value.f) {
                     permission = this._permissionCheckWithFormula(params);
                     errorMsg = this._localeService.t<LocaleKey>('sheets.permission.dialog.formulaErr');
-                } else {
-                    permission = this._permissionCheckBySetRangeValue(
-                        {
-                            workbookTypes: [WorkbookEditablePermission],
-                            worksheetTypes: [WorksheetSetCellValuePermission, WorksheetEditPermission],
-                            rangeTypes: [RangeProtectionPermissionEditPoint],
-                        },
-                        params
-                    );
-                    errorMsg = this._localeService.t<LocaleKey>('sheets.permission.dialog.editErr');
                 }
                 break;
 
