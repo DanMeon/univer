@@ -14,18 +14,24 @@
  * limitations under the License.
  */
 
-import type { LocaleKey } from '../../locale/types';
-import type { IBusinessComponentProps } from './interface';
+// Modified by Carenode, 2026 — only a cell showing the accounting format opens as accounting (xlsxkit panel-type-keeps-format)
+
 import { LocaleService } from '@univerjs/core';
 import { InputNumber, Select } from '@univerjs/design';
 import { getCurrencyType, getDecimalFromPattern, setPatternDecimal } from '@univerjs/sheets-numfmt';
 import { useDependency } from '@univerjs/ui';
 import { useContext, useLayoutEffect, useMemo, useState } from 'react';
+import type { LocaleKey } from '../../locale/types';
+import type { IBusinessComponentProps } from './interface';
 import { UserHabitCurrencyContext } from '../../controllers/user-habit.controller';
+import { xlsxkitIsSamePanelPattern } from './xlsxkit-panel-pattern';
 
+// Carenode xlsxkit panel-type-keeps-format: the accounting panel writes one format, `_("<symbol>"* #,##0.00_)` with the
+// cell's symbol and decimals (the action below), so only a cell that shows the same opens as accounting (upstream: any
+// `_(` format with a symbol, so Excel's four-section accounting lost its parentheses and its dash for zero on confirm).
 export const isAccountingPanel = (pattern: string) => {
     const type = getCurrencyType(pattern);
-    return !!type && pattern.startsWith('_(');
+    return !!type && xlsxkitIsSamePanelPattern(`_("${type}"* #,##0.00_)`, pattern);
 };
 
 export function AccountingPanel(props: IBusinessComponentProps) {

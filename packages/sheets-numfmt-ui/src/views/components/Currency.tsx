@@ -16,6 +16,7 @@
 
 // Modified by Carenode, 2026 — the currency panel starts at no decimals on a cell without a format (xlsxkit currency-panel-decimal-0)
 // Modified by Carenode, 2026 — the currency panel matches the negative line with the panel's own format match (xlsxkit panel-negative-match)
+// Modified by Carenode, 2026 — only a cell showing a currency line opens as currency (xlsxkit panel-type-keeps-format)
 
 import { LocaleService } from '@univerjs/core';
 import { InputNumber, Select, SelectList } from '@univerjs/design';
@@ -32,9 +33,12 @@ import type { IBusinessComponentProps } from './interface';
 import { UserHabitCurrencyContext } from '../../controllers/user-habit.controller';
 import { xlsxkitIsSamePanelPattern } from './xlsxkit-panel-pattern';
 
+// Carenode xlsxkit panel-type-keeps-format: only a cell one of the currency panel's negative-number lines shows as it is
+// opens as currency (upstream: any format with a symbol not starting `_(`, which opened on the first line when none
+// matched, so confirming rewrote it).
 export const isCurrencyPanel = (pattern: string) => {
     const type = getCurrencyType(pattern);
-    return !!type && !pattern.startsWith('_(');
+    return !!type && getCurrencyFormatOptions(type).some((item) => xlsxkitIsSamePanelPattern(item.value, pattern));
 };
 
 export function CurrencyPanel(props: IBusinessComponentProps) {
