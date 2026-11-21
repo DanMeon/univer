@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-4833 permission-list-creator: a protection card shows its creator name as text.
+
 import type { IRange, Workbook } from '@univerjs/core';
 import type { IPermissionPoint } from '@univerjs/protocol';
 import type { IRangeProtectionRule, IWorksheetProtectionRule } from '@univerjs/sheets';
@@ -333,7 +335,16 @@ function SheetPermissionPanelListContent({ ActionRowComponent }: Required<ISheet
                                     <div className="univer-my-2 univer-h-px univer-bg-gray-200" />
                                     <div>
                                         <div className="univer-flex univer-items-center">
-
+                                            {/* Carenode CNT-4833 permission-list-creator: "label, avatar, name" - the name is text, not only a tooltip (no hover on touch). */}
+                                            <span
+                                                className={`
+                                                  univer-mr-2 univer-h-4 univer-shrink-0 univer-text-xs
+                                                  univer-text-gray-900
+                                                  dark:!univer-text-gray-0
+                                                `}
+                                            >
+                                                {localeService.t<LocaleKey>('sheets-ui.permission.panel.created')}
+                                            </span>
                                             <Tooltip title={item.creator?.name ?? ''}>
                                                 <div>
                                                     <Avatar src={item.creator?.avatar} className="univer-mr-1.5" size={24} />
@@ -341,15 +352,18 @@ function SheetPermissionPanelListContent({ ActionRowComponent }: Required<ISheet
                                             </Tooltip>
                                             <span
                                                 className={`
-                                                  univer-h-4 univer-flex-grow univer-text-xs univer-text-gray-900
+                                                  univer-h-4 univer-min-w-0 univer-flex-grow univer-truncate
+                                                  univer-text-xs univer-font-medium univer-text-gray-900
                                                   dark:!univer-text-gray-0
                                                 `}
+                                                title={item.creator?.name ?? ''}
                                             >
-                                                {localeService.t<LocaleKey>('sheets-ui.permission.panel.created')}
+                                                {item.creator?.name ?? ''}
                                             </span>
                                             <span
                                                 className={`
-                                                  univer-h-4 univer-text-xs univer-text-gray-900
+                                                  univer-ml-1 univer-h-4 univer-shrink-0 univer-text-xs
+                                                  univer-text-gray-900
                                                   dark:!univer-text-gray-0
                                                 `}
                                             >
