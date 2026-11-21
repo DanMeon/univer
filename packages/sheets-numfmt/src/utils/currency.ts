@@ -14,9 +14,17 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the $ opening a [$…] locale tag is not a dollar (xlsxkit currency-symbol-locale-tag)
+
 import { currencySymbols } from '@univerjs/core';
 
+// Carenode xlsxkit currency-symbol-locale-tag: the `$` that opens a `[$…]` locale tag is not a dollar. Upstream found
+// `$` in any pattern holding `$`, so Korean Excel's `[$-412]yyyy"년" m"월" d"일"` and `[$₩-412]#,##0` read as dollar
+// formats: confirming the 「기타 서식」 panel on such a cell put `$` first in the panel's currency habit list, and 통화·회계
+// then started at `$`. A symbol inside the tag (`[$₩-412]`, `[$$-409]`) is still the format's symbol, and a `$` outside
+// one is a dollar as before.
 export const getCurrencyType = (pattern: string) => {
-    const item = currencySymbols.find((code) => pattern.includes(code));
+    const withoutLocaleTagOpeners = pattern.replace(/\[\$/g, '[');
+    const item = currencySymbols.find((code) => withoutLocaleTagOpeners.includes(code));
     return item;
 };
