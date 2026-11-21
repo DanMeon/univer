@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — registers the row calculation services the fill uses (CNT-4497 autofill-row-height)
+
 import type { ICellData, IStyleData, IWorkbookData, Univer, Workbook } from '@univerjs/core';
 import {
     BooleanNumber,
@@ -42,6 +44,8 @@ import { createTestBase } from '../../services/__tests__/util';
 import { AutoFillService, IAutoFillService } from '../../services/auto-fill/auto-fill.service';
 import { AUTO_FILL_APPLY_TYPE } from '../../services/auto-fill/type';
 import { SheetsSelectionsService } from '../../services/selections/selection.service';
+import { SheetInterceptorService } from '../../services/sheet-interceptor/sheet-interceptor.service';
+import { SheetSkeletonService } from '../../skeleton/skeleton.service';
 import { AutoFillController } from '../auto-fill.controller';
 
 const SOURCE_STYLE: IStyleData = {
@@ -100,6 +104,8 @@ describe('AutoFillController copy-fill shortcuts', () => {
     beforeEach(() => {
         const testBed = createTestBase(Tools.deepClone(WORKBOOK_DATA), [
             [SheetsSelectionsService],
+            [SheetInterceptorService],
+            [SheetSkeletonService],
             [IAutoFillService, { useClass: AutoFillService }],
             [AutoFillController],
         ]);

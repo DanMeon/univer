@@ -14,12 +14,13 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — a fill re-measures the filled rows with the row calculation every edit uses (CNT-4497 autofill-row-height)
+
 import type {
     IAccessor,
     IDisposable,
     IMutationInfo,
     IRange,
-    IRowAutoHeightInfo,
     Nullable,
     Workbook,
     Worksheet,
@@ -37,25 +38,21 @@ import {
     ObjectMatrix,
     RANGE_TYPE,
     Rectangle,
+    sequenceExecute,
     toDisposable,
     UniverInstanceType,
 } from '@univerjs/core';
 import { BehaviorSubject } from 'rxjs';
 import type { ISetRangeValuesMutationParams } from '../../commands/mutations/set-range-values.mutation';
-import type {
-    ISetWorksheetRowAutoHeightMutationParams,
-} from '../../commands/mutations/set-worksheet-row-height.mutation';
 import type { IAutoFillLocation, IAutoFillRule, ISheetAutoFillHook } from './type';
 import { discreteRangeToRange, rangeToDiscreteRange } from '../../basics/utils';
 import { AutoClearContentCommand } from '../../commands/commands/auto-fill.command';
-import { AFFECT_LAYOUT_STYLES } from '../../commands/commands/set-style.command';
+import { getRangesHeight, getSuitableRangesInView } from '../../commands/commands/util';
 import { getPrimaryForRange } from '../../commands/commands/utils/selection-utils';
 import { SetRangeValuesMutation } from '../../commands/mutations/set-range-values.mutation';
-import {
-    SetWorksheetRowAutoHeightMutation,
-    SetWorksheetRowAutoHeightMutationFactory,
-} from '../../commands/mutations/set-worksheet-row-height.mutation';
 import { SetSelectionsOperation } from '../../commands/operations/selection.operation';
+import { SheetSkeletonService } from '../../skeleton/skeleton.service';
+import { SheetInterceptorService } from '../sheet-interceptor/sheet-interceptor.service';
 import AutoFillRules from './rules';
 import { AUTO_FILL_APPLY_TYPE, AUTO_FILL_HOOK_TYPE } from './type';
 
@@ -105,6 +102,13 @@ export interface IApplyMenuItem {
     label: string;
     value: AUTO_FILL_APPLY_TYPE;
     disable: boolean;
+}
+
+// Carenode CNT-4497 autofill-row-height: the filled rows split for the row calculation, with the pre-fill heights.
+interface IXlsxkitFilledRows {
+    suitableRanges: IRange[];
+    remainingRanges: IRange[];
+    cellHeights: ObjectMatrix<number>;
 }
 
 export class AutoFillService extends Disposable implements IAutoFillService {
@@ -490,10 +494,13 @@ export class AutoFillService extends Disposable implements IAutoFillService {
                 redos.push(...hookRedos);
             }
         });
+        // Carenode CNT-4497 autofill-row-height: the filled cells' heights are read before the fill runs, as
+        // SetRangeValuesCommand does.
+        const xlsxkitFilled = this._xlsxkitFilledRows(redos, workbook, worksheet);
         const result = redos.every((m) => this._commandService.syncExecuteCommand(m.id, m.params));
 
         // deal with auto-height
-        const { redos: autoHeightRedos, undos: autoHeightUndos } = this._getAutoHeightUndoRedos(redos, workbook, worksheet);
+        const { redos: autoHeightRedos, undos: autoHeightUndos } = this._getAutoHeightUndoRedos(xlsxkitFilled, workbook, worksheet);
         redos.push(...autoHeightRedos);
         undos.push(...autoHeightUndos);
 
@@ -513,64 +520,59 @@ export class AutoFillService extends Disposable implements IAutoFillService {
         return true;
     }
 
-    private _getAutoHeightUndoRedos(executedRedos: IMutationInfo[], workbook: Workbook, worksheet: Worksheet) {
-        if (this.applyType === AUTO_FILL_APPLY_TYPE.NO_FORMAT) {
+    // Carenode CNT-4497 autofill-row-height: upstream wrote each filled cell's own height as its row's height, so a
+    // taller cell elsewhere in the row was cut, the row floor was skipped, and a fill without formats never re-measured.
+    // The filled rows go to the row calculation every other edit uses (SheetInterceptorService
+    // .generateMutationsOfAutoHeight), whatever the apply type, split and hinted the way SetStyleCommand does it.
+    private _getAutoHeightUndoRedos(filled: IXlsxkitFilledRows, workbook: Workbook, worksheet: Worksheet) {
+        if (filled.suitableRanges.length === 0 && filled.remainingRanges.length === 0) {
             return { undos: [], redos: [] };
         }
 
-        const rowsAutoHeightInfo: IRowAutoHeightInfo[] = [];
-        const defaultRowHeight = worksheet.getConfig().defaultRowHeight;
-        const rowManager = worksheet.getRowManager();
-
-        executedRedos.forEach((m) => {
-            if (m.id === SetRangeValuesMutation.id) {
-                const { cellValue } = m.params as ISetRangeValuesMutationParams;
-                const matrix = new ObjectMatrix(cellValue);
-                matrix.forValue((row, col, value) => {
-                    const style = Object.keys(workbook.getStyles().get(value?.s) || {});
-                    if (value?.p || (style.length && AFFECT_LAYOUT_STYLES.some((s) => style.includes(s)))) {
-                        const cellHeight = worksheet.getCellHeight(row, col);
-                        const rowData = rowManager.getRow(row);
-                        if ((!rowData && cellHeight !== defaultRowHeight) || (rowData && cellHeight !== rowManager.getRowHeight(row))) {
-                            rowsAutoHeightInfo.push({
-                                row,
-                                autoHeight: cellHeight,
-                            });
-                        }
-                    }
-                });
-            }
-        });
-
-        if (rowsAutoHeightInfo.length === 0) {
-            return { undos: [], redos: [] };
-        }
-
-        const redoParams: ISetWorksheetRowAutoHeightMutationParams = {
+        const { undos, redos } = this._injector.get(SheetInterceptorService).generateMutationsOfAutoHeight({
             unitId: workbook.getUnitId(),
             subUnitId: worksheet.getSheetId(),
-            rowsAutoHeightInfo,
-        };
-        const undoParams = SetWorksheetRowAutoHeightMutationFactory(redoParams, worksheet);
+            ranges: filled.suitableRanges,
+            autoHeightRanges: filled.suitableRanges,
+            lazyAutoHeightRanges: filled.remainingRanges,
+            cellHeights: filled.cellHeights,
+        });
 
-        const redo = {
-            id: SetWorksheetRowAutoHeightMutation.id,
-            params: redoParams,
-        };
-        const result = this._commandService.syncExecuteCommand(redo.id, redo.params);
-
-        if (!result) {
+        if (!sequenceExecute(redos, this._commandService).result) {
             return { undos: [], redos: [] };
         }
 
+        return { undos, redos };
+    }
+
+    // Carenode CNT-4497 autofill-row-height: one range per filled row over its filled columns; the rows near the
+    // viewport (getSuitableRangesInView) are measured now with each cell's pre-fill height as the hint, the rest go to
+    // the lazy pass.
+    private _xlsxkitFilledRows(redos: IMutationInfo[], workbook: Workbook, worksheet: Worksheet): IXlsxkitFilledRows {
+        const columns = new Map<number, [number, number]>();
+        redos.forEach((m) => {
+            if (m.id !== SetRangeValuesMutation.id) {
+                return;
+            }
+            new ObjectMatrix((m.params as ISetRangeValuesMutationParams).cellValue).forValue((row, col) => {
+                const span = columns.get(row);
+                columns.set(row, span ? [Math.min(span[0], col), Math.max(span[1], col)] : [col, col]);
+            });
+        });
+
+        const ranges: IRange[] = [...columns].map(([row, [startColumn, endColumn]]) => ({
+            startRow: row,
+            endRow: row,
+            startColumn,
+            endColumn,
+        }));
+        const skeleton = this._injector.get(SheetSkeletonService).getSkeleton(workbook.getUnitId(), worksheet.getSheetId());
+        const { suitableRanges, remainingRanges } = getSuitableRangesInView(ranges, skeleton);
+
         return {
-            redos: [redo],
-            undos: [
-                {
-                    id: SetWorksheetRowAutoHeightMutation.id,
-                    params: undoParams,
-                },
-            ],
+            suitableRanges,
+            remainingRanges,
+            cellHeights: getRangesHeight(suitableRanges, worksheet),
         };
     }
 }

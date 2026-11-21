@@ -14,13 +14,17 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — registers the row calculation services the fill uses, empty-fill auto-height case (CNT-4497 autofill-row-height)
+
 import type { Injector, IRange, Univer, Workbook } from '@univerjs/core';
-import { Direction, ICommandService, IUniverInstanceService, UniverInstanceType } from '@univerjs/core';
+import { Direction, ICommandService, IUniverInstanceService, ObjectMatrix, UniverInstanceType } from '@univerjs/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IAutoFillRule } from '../type';
 import { createTestBase, TEST_WORKBOOK_DATA_DEMO } from '../../__tests__/util';
 import { SetSelectionsOperation } from '../../../commands/operations/selection.operation';
+import { SheetSkeletonService } from '../../../skeleton/skeleton.service';
 import { SheetsSelectionsService } from '../../selections/selection.service';
+import { SheetInterceptorService } from '../../sheet-interceptor/sheet-interceptor.service';
 import { AutoFillService } from '../auto-fill.service';
 import { AUTO_FILL_APPLY_TYPE, AUTO_FILL_DATA_TYPE, AUTO_FILL_HOOK_TYPE } from '../type';
 
@@ -35,6 +39,8 @@ describe('AutoFillService', () => {
     beforeEach(() => {
         const testBed = createTestBase(TEST_WORKBOOK_DATA_DEMO, [
             [SheetsSelectionsService],
+            [SheetInterceptorService],
+            [SheetSkeletonService],
             [AutoFillService],
         ]);
 
@@ -215,12 +221,13 @@ describe('AutoFillService', () => {
         expect((service as any)._prevUndos).toEqual([]);
     });
 
-    it('should skip auto-height mutation generation in NO_FORMAT mode', () => {
+    // Carenode CNT-4497 autofill-row-height: a fill re-measures its rows whatever the apply type, so only an empty fill skips.
+    it('should skip auto-height mutation generation when no row was filled', () => {
         const workbook = get(IUniverInstanceService).getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET)!;
         const worksheet = workbook.getActiveSheet()!;
         service.applyType = AUTO_FILL_APPLY_TYPE.NO_FORMAT;
 
-        const result = (service as any)._getAutoHeightUndoRedos([], workbook, worksheet);
+        const result = (service as any)._getAutoHeightUndoRedos({ suitableRanges: [], remainingRanges: [], cellHeights: new ObjectMatrix<number>() }, workbook, worksheet);
         expect(result).toEqual({ undos: [], redos: [] });
     });
 });
