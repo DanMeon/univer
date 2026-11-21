@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
-import type { IWorksheetProtectionRenderCellData } from '../../services/permission/worksheet-permission/type';
+// Modified by Carenode, 2026 — the sheet interceptor keeps a cell's range rule (xlsxkit protection-merge)
+
 import { Disposable, Inject, InterceptorEffectEnum, IPermissionService } from '@univerjs/core';
 import { UnitAction } from '@univerjs/protocol';
+import type { IWorksheetProtectionRenderCellData } from '../../services/permission/worksheet-permission/type';
 import { RangeProtectionCache } from '../../models/range-protection.cache';
 import { WorksheetEditPermission, WorksheetViewPermission } from '../../services/permission/permission-point';
 import { WorksheetProtectionRuleModel } from '../../services/permission/worksheet-permission';
@@ -70,13 +72,28 @@ export class SheetPermissionViewModelController extends Disposable {
             priority: 999,
             effect: InterceptorEffectEnum.Value | InterceptorEffectEnum.Style,
             handler: (cell, context, next) => {
-                const { unitId, subUnitId } = context;
+                const { unitId, subUnitId, row, col } = context;
                 const worksheetRule = this._worksheetProtectionRuleModel.getRule(unitId, subUnitId);
                 if (worksheetRule?.permissionId) {
                     const selectionProtection = [{
                         [UnitAction.View]: this._permissionService.getPermissionPoint(new WorksheetViewPermission(unitId, subUnitId).id)?.value ?? false,
                         [UnitAction.Edit]: this._permissionService.getPermissionPoint(new WorksheetEditPermission(unitId, subUnitId).id)?.value ?? false,
                     }];
+                    // Carenode xlsxkit protection-merge: on a sheet with a sheet rule and range rules (the work-log lock)
+                    // upstream put the sheet's points in place of the cell's range rule, which the range interceptor had
+                    // just set, so every reader of `selectionProtection[0]` (typing and opening the cell editor through
+                    // `permissionCheckWithoutRange`, a press on a cell's dropdown or checkbox, paste, the fill handle,
+                    // dragging a selection) missed the range lock. The cell keeps its range rule (rule id, ranges,
+                    // points) from the same cache, and edit and view stay allowed only where both the range and the sheet
+                    // allow them.
+                    const xlsxkitRangeProtection = this._rangeProtectionCache.getCellInfo(unitId, subUnitId, row, col);
+                    if (xlsxkitRangeProtection) {
+                        selectionProtection[0] = {
+                            ...xlsxkitRangeProtection,
+                            [UnitAction.View]: xlsxkitRangeProtection[UnitAction.View] === true && selectionProtection[0][UnitAction.View],
+                            [UnitAction.Edit]: xlsxkitRangeProtection[UnitAction.Edit] === true && selectionProtection[0][UnitAction.Edit],
+                        };
+                    }
                     const isSkipRender = !selectionProtection[0]?.[UnitAction.View];
                     const _cellData = ((!cell || cell === context.rawData) ? { ...cell } : cell) as IWorksheetProtectionRenderCellData;
                     _cellData.hasWorksheetRule = true;
