@@ -14,11 +14,13 @@
  * limitations under the License.
  */
 
-import type { IPermissionPanelRule } from '../../services/permission/sheet-permission-panel.model';
+// Modified by Carenode, 2026 — CNT-4833 permission-panel-open: the detail panel remounts on every open.
+
 import { IUniverInstanceService } from '@univerjs/core';
 import { serializeRangeWithSheet } from '@univerjs/engine-formula';
 import { getSheetCommandTarget, SheetsSelectionsService } from '@univerjs/sheets';
 import { useDependency } from '@univerjs/ui';
+import type { IPermissionPanelRule } from '../../services/permission/sheet-permission-panel.model';
 import { SheetPermissionPanelModel } from '../../services/permission/sheet-permission-panel.model';
 import { SheetPermissionPanelDetail } from './panel-detail/PermissionDetailPanel';
 import { SheetPermissionPanelList } from './SheetPermissionPanelList';
@@ -28,6 +30,8 @@ export interface ISheetPermissionPanelProps {
     fromSheetBar: boolean;
     rule?: IPermissionPanelRule;
     oldRule?: IPermissionPanelRule;
+    /** Carenode CNT-4833 permission-panel-open: the open this render belongs to (SheetPermissionOpenPanelOperation). */
+    openId?: number;
     DetailComponent?: typeof SheetPermissionPanelDetail;
     ListComponent?: typeof SheetPermissionPanelList;
 };
@@ -37,6 +41,7 @@ export const SheetPermissionPanel = ({
     fromSheetBar,
     rule,
     oldRule,
+    openId,
     DetailComponent = SheetPermissionPanelDetail,
     ListComponent = SheetPermissionPanelList,
 }: ISheetPermissionPanelProps) => {
@@ -60,7 +65,9 @@ export const SheetPermissionPanel = ({
                     fromSheetBar={fromSheetBar}
                     rule={rule}
                     oldRule={oldRule}
-                    key={fromSheetBar ? 'sheet-bar' : 'normal'}
+                    // Carenode CNT-4833 permission-panel-open: a new open remounts the detail panel, whose state is seeded
+                    // from its first rule.
+                    key={`${fromSheetBar ? 'sheet-bar' : 'normal'}${openId === undefined ? '' : `-${openId}`}`}
                 />
             )
             : <ListComponent key={key} />

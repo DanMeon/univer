@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-4833 permission-panel-open: the opened panel carries an openId.
+
 import { Injector, IUniverInstanceService, LocaleService } from '@univerjs/core';
 import { IEditorService } from '@univerjs/docs-ui';
 import { UnitObject } from '@univerjs/protocol';
@@ -218,6 +220,7 @@ describe('sheet bar and permission operations', () => {
                 fromSheetBar: true,
                 rule,
                 oldRule: rule,
+                openId: expect.any(Number), // Carenode CNT-4833 permission-panel-open
             },
         })]);
 

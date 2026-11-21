@@ -14,10 +14,12 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-4833 permission-panel-open: each open of the protection panel carries its own openId.
+
 import type { ICommand } from '@univerjs/core';
-import type { IPermissionPanelRule } from '../../services/permission/sheet-permission-panel.model';
 import { CommandType } from '@univerjs/core';
 import { ISidebarService } from '@univerjs/ui';
+import type { IPermissionPanelRule } from '../../services/permission/sheet-permission-panel.model';
 import { UNIVER_SHEET_PERMISSION_PANEL } from '../../consts/permission';
 import { SheetPermissionPanelModel } from '../../services/permission/sheet-permission-panel.model';
 import { SheetPermissionUserManagerService } from '../../services/permission/sheet-permission-user-list.service';
@@ -28,6 +30,10 @@ export interface IPermissionOpenPanelParam {
     rule?: IPermissionPanelRule;
     oldRule?: IPermissionPanelRule;
 }
+
+// Carenode CNT-4833 permission-panel-open: every open of the panel gets its own number, so the detail panel mounts
+// afresh instead of keeping the ranges, name and states of the rule it was first opened for.
+let xlsxkitPermissionPanelOpenSeq = 0;
 
 export const SheetPermissionOpenPanelOperation: ICommand<IPermissionOpenPanelParam> = {
     type: CommandType.OPERATION,
@@ -47,6 +53,7 @@ export const SheetPermissionOpenPanelOperation: ICommand<IPermissionOpenPanelPar
                 fromSheetBar,
                 rule,
                 oldRule,
+                openId: ++xlsxkitPermissionPanelOpenSeq, // Carenode CNT-4833 permission-panel-open
             },
             width: 330,
             onClose: () => {
