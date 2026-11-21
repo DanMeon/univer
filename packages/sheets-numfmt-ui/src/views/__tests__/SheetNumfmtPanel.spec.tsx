@@ -14,15 +14,17 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — provides RegionService, which the currency panels read (xlsxkit currency-panel-locale-first)
+
 import type { Root } from 'react-dom/client';
-import type { ISheetNumfmtPanelProps } from '../SheetNumfmtPanel';
-import { ILocalStorageService, Injector, LocaleService, LocaleType } from '@univerjs/core';
+import { ILocalStorageService, Injector, LocaleService, LocaleType, RegionService } from '@univerjs/core';
 import { ConfigProvider } from '@univerjs/design';
 import designEnUS from '@univerjs/design/locale/en-US';
 import { DesktopLocalStorageService, RediContext } from '@univerjs/ui';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ISheetNumfmtPanelProps } from '../SheetNumfmtPanel';
 import { UserHabitController } from '../../controllers/user-habit.controller';
 import enUS from '../../locale/en-US';
 import zhCN from '../../locale/zh-CN';
@@ -49,6 +51,7 @@ afterEach(async () => {
 async function renderPanel(value: ISheetNumfmtPanelProps['value']) {
     const injector = new Injector([
         [LocaleService],
+        [RegionService],
         [ILocalStorageService, { useClass: DesktopLocalStorageService }],
         [UserHabitController],
     ]);
