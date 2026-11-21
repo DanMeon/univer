@@ -1,0 +1,26 @@
+# Univer packages Carenode declares directly (apps/xlsxkit/packages/editor, apps/xlsxkit/examples/demo-app
+# and apps/frontend manifests in the Carenode repository). select-packages.mts publishes their
+# production-dependency closure. Change this list together with the Carenode manifests.
+@univerjs/core
+@univerjs/data-validation
+@univerjs/design
+@univerjs/drawing
+@univerjs/drawing-ui
+@univerjs/engine-formula
+@univerjs/engine-render
+@univerjs/preset-sheets-core
+@univerjs/sheets
+@univerjs/sheets-conditional-formatting
+@univerjs/sheets-conditional-formatting-ui
+@univerjs/sheets-data-validation
+@univerjs/sheets-data-validation-ui
+@univerjs/sheets-drawing
+@univerjs/sheets-drawing-ui
+@univerjs/sheets-filter
+@univerjs/sheets-filter-ui
+@univerjs/sheets-numfmt
+@univerjs/sheets-sort
+@univerjs/sheets-sort-ui
+@univerjs/sheets-ui
+@univerjs/themes
+@univerjs/ui
