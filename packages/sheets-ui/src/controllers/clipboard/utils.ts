@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3483 (b''): a paste removes only the merges its pasted cells land on.
+
 /* eslint-disable max-lines-per-function */
 
 import type { IAccessor, ICellData, ICustomRange, IDocumentBody, IMutationInfo, IParagraph, IRange, IStyleData, Nullable } from '@univerjs/core';
@@ -23,7 +25,6 @@ import type {
     IRemoveWorksheetMergeMutationParams,
     ISetRangeValuesMutationParams,
 } from '@univerjs/sheets';
-import type { ICellDataWithSpanInfo, ICopyPastePayload, ISheetDiscreteRangeLocation } from '../../services/clipboard/type';
 import {
     CellValueType,
     cloneCellDataMatrix,
@@ -51,6 +52,7 @@ import {
     SetRangeValuesMutation,
     SetRangeValuesUndoMutationFactory,
 } from '@univerjs/sheets';
+import type { ICellDataWithSpanInfo, ICopyPastePayload, ISheetDiscreteRangeLocation } from '../../services/clipboard/type';
 import { COPY_TYPE } from '../../services/clipboard/type';
 import { isRichText } from '../editor/editing.render-controller';
 import { virtualizeDiscreteRanges } from '../utils/range-tools';
@@ -448,8 +450,13 @@ export function getClearAndSetMergeMutations(
     const { unitId, subUnitId, range } = pasteTo;
     const { startColumn, startRow, endColumn, endRow } = discreteRangeToRange(range);
     const mergeRangeData: IRange[] = [];
+    // Carenode CNT-3483 (b''): the sheet cells the pasted matrix actually lands on (the range may be discrete).
+    const occupiedCells = new Set<string>();
+    const { mapFunc } = virtualizeDiscreteRanges([range]);
 
     matrix.forValue((row, col, value) => {
+        const { row: occupiedRow, col: occupiedCol } = mapFunc(row, col);
+        occupiedCells.add(`${occupiedRow}:${occupiedCol}`);
         if (value.rowSpan && value.rowSpan > 1) {
             const colSpan = value.colSpan || 1;
             const mergeRange = {
@@ -477,9 +484,21 @@ export function getClearAndSetMergeMutations(
     const target = getSheetCommandTarget(accessor.get(IUniverInstanceService), { unitId, subUnitId });
     if (target && target.worksheet) {
         const mergeData = target.worksheet.getMergeData();
-        const mergedCellsInRange = mergeData.filter((rect) =>
-            Rectangle.intersects({ startRow, startColumn, endRow, endColumn }, rect)
-        );
+        // Carenode CNT-3483 (b''): only a merge a pasted cell lands on is removed. The bounding rectangle of a paste
+        // that skips cells (a resolver-mapped merge grid) also covers merges no pasted cell touches, e.g. a photo cell.
+        const mergedCellsInRange = mergeData.filter((rect) => {
+            if (!Rectangle.intersects({ startRow, startColumn, endRow, endColumn }, rect)) {
+                return false;
+            }
+            for (let r = rect.startRow; r <= rect.endRow; r++) {
+                for (let c = rect.startColumn; c <= rect.endColumn; c++) {
+                    if (occupiedCells.has(`${r}:${c}`)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        });
 
         if (mergedCellsInRange.length > 0) {
             const removeMergeMutationParams: IRemoveWorksheetMergeMutationParams = {
