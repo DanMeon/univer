@@ -307,8 +307,10 @@ for (const r of results) {
     for (const d of r.disallowed) log(`DIFF ${r.name} ${d.file}: ${d.kind}${d.detail ? ` (${d.detail})` : ''}`);
     for (const a of r.allowed.filter((x) => x.kind.startsWith('changed-source'))) log(`changed source ${r.name} ${a.file}: ${a.kind}`);
 }
-const allowedText = mode === 'fork' ? `, allowed differences ${JSON.stringify(Object.fromEntries(allowedKinds))}` : '';
-log(`${layer}: ${results.length} packages, ${files} files compared${allowedText}, differences outside the allowed list: ${disallowed.length}`);
+const verdict = mode === 'fork'
+    ? `allowed differences ${JSON.stringify(Object.fromEntries(allowedKinds))}, differences outside the allowed list: ${disallowed.length}`
+    : `differences: ${disallowed.length}`;
+log(`${layer}: ${results.length} packages, ${files} files compared, ${verdict}`);
 if (disallowed.length > 0) {
     process.exitCode = 1;
 }

@@ -197,7 +197,7 @@ jobs:
                   if-no-files-found: ignore
 
     stage-publish:
-        name: stage ${{ needs.meta.outputs.version }} on npm
+        name: stage on npm (build N >= 1)
         needs: [meta, upstream-build, fork-build]
         if: github.repository == 'DanMeon/univer' && needs.meta.outputs.publish == 'true'
         runs-on: ubuntu-latest
