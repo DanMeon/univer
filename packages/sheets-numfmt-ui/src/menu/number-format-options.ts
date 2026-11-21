@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
-import type { LocaleKey } from '../locale/types';
+// Modified by Carenode, 2026 — the list's currency entry writes the symbol with no decimals (xlsxkit menu-currency-no-decimal)
+
 import { DEFAULT_TEXT_FORMAT_EXCEL } from '@univerjs/core';
+import type { LocaleKey } from '../locale/types';
 
 export const MENU_OPTIONS = (currencySymbol: string): Array<{
     label: LocaleKey;
@@ -54,7 +56,11 @@ export const MENU_OPTIONS = (currencySymbol: string): Array<{
         },
         {
             label: 'sheets-numfmt-ui.currency',
-            pattern: `"${currencySymbol}"#,##0.00_);[Red]("${currencySymbol}"#,##0.00)`,
+            // Carenode xlsxkit menu-currency-no-decimal: the list's currency entry writes the same `₩#,##0` (on a Korean
+            // screen) as the editor's ribbon currency button and Ctrl+Shift+4; upstream wrote
+            // `"₩"#,##0.00_);[Red]("₩"#,##0.00)`. The list's own label matches cells against this entry, so those cells
+            // are now named currency rather than "more formats".
+            pattern: `${currencySymbol}#,##0`,
         },
         {
             label: 'sheets-numfmt-ui.roundingCurrency',
