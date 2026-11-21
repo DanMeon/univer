@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: the 2D context stub has save and restore, which Canvas.clear calls.
+
 import type { DocumentDataModel, IDocumentData, IWorkbookData, Workbook } from '@univerjs/core';
 import type { RenderUnit } from '@univerjs/engine-render';
 import {
@@ -341,6 +343,8 @@ function createRealResizeTestBed(
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
         return {
             canvas: this,
+            save: vi.fn(),
+            restore: vi.fn(),
             setTransform: vi.fn(),
             clearRect: vi.fn(),
             measureText: (text: string) => ({

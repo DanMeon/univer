@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: scroll cache source offsets stay logical pixels.
+
 import type { IPosition, IRange, Nullable } from '@univerjs/core';
 import { BooleanNumber, sortRules, Tools } from '@univerjs/core';
 import type { IBoundRectNoAngle, IViewportInfo, Vector2 } from '../../basics/vector2';
@@ -754,9 +756,10 @@ export class Spreadsheet extends SheetComponent {
             cacheCtx = renderCacheCanvas.getContext();
             cacheCtx.save();
         }
-        // support for browser native zoom (only windows has this problem)
-        const sourceLeft = bufferEdgeSizeX * Math.min(1, window.devicePixelRatio);
-        const sourceTop = bufferEdgeSizeY * Math.min(1, window.devicePixelRatio);
+        // Carenode CNT-3201: the source offsets are logical pixels; _applyCache multiplies them by the cache canvas
+        // pixel ratio, which is now below 1 when the browser zooms out.
+        const sourceLeft = bufferEdgeSizeX;
+        const sourceTop = bufferEdgeSizeY;
         const { left, top, right, bottom } = viewPortPosition;
         const dw = right - left + rowHeaderWidthAndMarginLeft;
         const dh = bottom - top + columnHeaderHeightAndMarginTop;

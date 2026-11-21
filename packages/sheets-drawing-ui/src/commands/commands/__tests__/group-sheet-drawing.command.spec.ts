@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: the 2D context stub has save and restore, which Canvas.clear calls.
+
 import { DrawingTypeEnum } from '@univerjs/core';
 import { getDrawingShapeKeyByDrawingSearch, IDrawingManagerService } from '@univerjs/drawing';
 import { insertGroupObject } from '@univerjs/drawing-ui';
@@ -28,7 +30,7 @@ import { createSheetDrawing, insertDrawings } from './drawing-command-test-utils
 describe('GroupSheetDrawingCommand', () => {
     it.each([[false, false], [true, false], [false, true], [true, true]])('restores sheet group picking and stacking with flips %s/%s', async (flipX, flipY) => {
         const contextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
-            return { canvas: this, setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D;
+            return { canvas: this, save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D;
         });
         const testBed = createSheetsDrawingUiTestBed();
         const engine = new Engine('group-engine', { elementWidth: 800, elementHeight: 500, dpr: 1 });

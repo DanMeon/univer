@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: keep device pixel ratios below 1 (browser zoom-out).
+
 import type { IPosition } from '@univerjs/core';
 import { BorderStyleTypes } from '@univerjs/core';
 import type { UniverRenderingContext } from '../context';
@@ -47,9 +49,8 @@ export function getDevicePixelRatio(): number {
         return devicePixelRatio / backingStoreRatio;
     })();
 
-    if (_pixelRatio < 1) {
-        return 1;
-    }
+    // Carenode CNT-3201: keep a ratio below 1 (browser zoom-out). Clamping it to 1 rasterizes at DPR 1 and the
+    // browser then downsamples the canvas, which drops thin borders and glyph strokes.
     return _pixelRatio;
 }
 

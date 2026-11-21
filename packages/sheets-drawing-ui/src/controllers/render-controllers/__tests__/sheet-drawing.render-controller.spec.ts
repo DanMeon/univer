@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: the 2D context stub has save and restore, which Canvas.clear calls.
+
 import type { ISheetDrawing } from '@univerjs/sheets-drawing';
 import type { Subscription } from 'rxjs';
 import { DrawingTypeEnum, ILogService, LocaleType, LogLevel, Tools, UniverInstanceType } from '@univerjs/core';
@@ -31,7 +33,7 @@ import '@univerjs/sheets-drawing/facade';
 describe('SheetsDrawingRenderController', () => {
     it('loads issue 5842 data, initializes healthy images, and preserves edits across save and reload', async () => {
         const canvasContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
-            { setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
+            { save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
         );
         const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
         const source = createSheetsDrawingUiTestBed();
@@ -133,7 +135,7 @@ describe('SheetsDrawingRenderController', () => {
         ['collapsed column', SheetDrawingAnchorType.Both],
     ] as const)('preserves image anchors and size across %s, save, rendering and show (%s)', async (scenario, anchorType) => {
         const canvasContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
-            { setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
+            { save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
         );
         const bed = createSheetsDrawingUiTestBed();
         let restored: ReturnType<typeof createSheetsDrawingUiTestBed> | undefined;
@@ -204,7 +206,7 @@ describe('SheetsDrawingRenderController', () => {
 
     it('renders legacy cell anchors while preserving explicit absolute and group-local bounds', () => {
         const canvasContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
-            { setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
+            { save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
         );
         const bed = createSheetsDrawingUiTestBed({
             id: 'unit-1',

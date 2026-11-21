@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: the 2D context stub has save and restore, which Canvas.clear calls.
+
 import type { IWorkbookData, Workbook } from '@univerjs/core';
 import type { IPointerEvent } from '@univerjs/engine-render';
 import {
@@ -72,7 +74,7 @@ describe('SheetContextMenuRenderController pointer gestures', () => {
     beforeEach(() => {
         vi.useFakeTimers();
         vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
-            return { canvas: this, setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D;
+            return { canvas: this, save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D;
         });
         univer = new Univer();
         const injector = univer.__getInjector();

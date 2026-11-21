@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: the 2D context stub has save and restore, which Canvas.clear calls.
+
 import type { ICommandInfo } from '@univerjs/core';
 import type { IDrawingGroupUpdateParam } from '@univerjs/drawing';
 import { BooleanNumber, DrawingTypeEnum, Univer, UniverInstanceType } from '@univerjs/core';
@@ -276,7 +278,7 @@ describe('DrawingUpdateController', () => {
 
     it.each([{ GroupType: Group }, { GroupType: DrawingGroupObject }])('arranges $GroupType.name and repeated instances without interrupting other drawings', ({ GroupType }) => {
         const getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
-            return { canvas: this, setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D;
+            return { canvas: this, save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D;
         });
         const univer = new Univer();
         try {

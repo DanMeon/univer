@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: the 2D context stub has save and restore, which Canvas.clear calls.
+
 import {
     ConfigService,
     ContextService,
@@ -96,7 +98,7 @@ describe('SheetSkeletonManagerService', () => {
         injector.get(SheetSkeletonService);
         (injector.get(IUniverInstanceService) as UniverInstanceService).__addUnit(workbook);
         const canvasContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
-            { setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
+            { save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
         );
         onTestFinished(() => canvasContext.mockRestore());
         const renderManager = injector.get(IRenderManagerService);
@@ -143,7 +145,7 @@ describe('SheetSkeletonManagerService', () => {
         injector.get(SheetSkeletonService);
         (injector.get(IUniverInstanceService) as UniverInstanceService).__addUnit(workbook);
         const canvasContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
-            { setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
+            { save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D
         );
         onTestFinished(() => canvasContext.mockRestore());
         const renderManager = injector.get(IRenderManagerService);

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: Canvas.clear clears every backing pixel below DPR 1.
+
 import type { Nullable } from '@univerjs/core';
 import type { ICanvasColorService } from './services/canvas-color.service';
 import { getDevicePixelRatio } from './basics/draw';
@@ -180,8 +182,14 @@ export class Canvas {
     }
 
     clear() {
+        // Carenode CNT-3201: clear every backing pixel whatever the current transform is. A clear scaled by the
+        // pixel ratio only reaches the top-left part of the canvas below DPR 1 and leaves old scroll ink behind.
         const ctx = this.getContext();
-        ctx.clearRect(0, 0, this._width * this._pixelRatio, this._height * this._pixelRatio);
+        const canvas = this.getCanvasEle();
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.restore();
     }
 
     /**

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: the 2D context stub has save and restore, which Canvas.clear calls.
+
 import {
     ArrangeTypeEnum,
     DrawingTypeEnum,
@@ -81,7 +83,7 @@ describe('SheetDrawingUpdateController', () => {
         [500, 500, 500, 500],
     ])('fits a %i × %i floating image without enlarging it or changing its aspect ratio', async (width, height, expectedWidth, expectedHeight) => {
         const canvasContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
-            return { canvas: this, setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D;
+            return { canvas: this, save: vi.fn(), restore: vi.fn(), setTransform: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D;
         });
         const imageConstructor = vi.spyOn(globalThis, 'Image').mockImplementation(function () {
             const image = document.createElement('img');

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-3201: the 2D context stub has save and restore, which Canvas.clear calls.
+
 import type { IFreeze, IRange, IRangeWithCoord, IWorkbookData, Workbook } from '@univerjs/core';
 import type { IPointerEvent } from '@univerjs/engine-render';
 import { ICommandService, LocaleType, Univer, UniverInstanceType } from '@univerjs/core';
@@ -159,6 +161,8 @@ function createFixture(options: IFixtureOptions = {}) {
 
 beforeEach(() => {
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+        save: () => {},
+        restore: () => {},
         setTransform: () => {},
         clearRect: () => {},
     } as unknown as CanvasRenderingContext2D);
