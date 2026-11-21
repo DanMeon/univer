@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — sheet-tab-press-end: a sheet tab press also ends on pointercancel, and long press needs the held capture.
+
 import type { IScrollState } from '../../../../services/sheet-bar/type';
 import { Animate } from './animate';
 import { calculateSheetTabDragSort, reorderItems } from './sheet-tab-drag-sort';
@@ -376,6 +378,7 @@ export class SlideTabBar {
                 activeSlideItemElement.releasePointerCapture(pointerId);
             }
             this._activeTabItem.removeEventListener('pointerup', this._upAction);
+            this._activeTabItem.removeEventListener('pointercancel', this._cancelAction); // Carenode sheet-tab-press-end
             return;
         }
 
@@ -395,6 +398,7 @@ export class SlideTabBar {
 
         this._activeTabItem?.removeEventListener('pointermove', this._moveAction);
         this._activeTabItem?.removeEventListener('pointerup', this._upAction);
+        this._activeTabItem?.removeEventListener('pointercancel', this._cancelAction); // Carenode sheet-tab-press-end
         if (
             this._config.onSlideEnd &&
             this._activeTabItemIndex !== this._compareIndex &&
@@ -403,6 +407,39 @@ export class SlideTabBar {
             this.removeListener();
             this._config.onSlideEnd(upEvent, this._compareIndex || 0);
         }
+
+        this._scrollIncremental = 0;
+        this._downActionX = 0;
+        this._moveActionX = 0;
+        this._dragStartScrollX = this._slideScrollbar.getScrollX();
+        this._compareIndex = 0;
+    };
+
+    /**
+     * Carenode sheet-tab-press-end: the press ended without `pointerup` - the browser took the touch for a pan or the
+     * OS long press (`pointercancel`). Undo it as `_upAction` does but never commit a reorder: the user did not drop
+     * the tab. The browser has already released the pointer capture.
+     */
+    protected _cancelAction = () => {
+        if (this._longPressTimer) {
+            clearTimeout(this._longPressTimer);
+            this._longPressTimer = null;
+        }
+
+        const activeTabItem = this._activeTabItem;
+        if (!activeTabItem || activeTabItem.isEditMode()) return;
+
+        this._closeAutoScroll();
+        activeTabItem.disableFixed();
+        this.updateItems();
+
+        const activeSlideItemElement = activeTabItem.getSlideTabItem();
+        if (activeSlideItemElement) {
+            activeSlideItemElement.style.cursor = '';
+        }
+        activeTabItem.removeEventListener('pointermove', this._moveAction);
+        activeTabItem.removeEventListener('pointerup', this._upAction);
+        activeTabItem.removeEventListener('pointercancel', this._cancelAction);
 
         this._scrollIncremental = 0;
         this._downActionX = 0;
@@ -516,6 +553,7 @@ export class SlideTabBar {
             if (this._activeTabItemIndex !== slideItemIndex) {
                 this._activeTabItem?.removeEventListener('pointermove', this._moveAction);
                 this._activeTabItem?.removeEventListener('pointerup', this._upAction);
+                this._activeTabItem?.removeEventListener('pointercancel', this._cancelAction); // Carenode sheet-tab-press-end
                 this._config.onChangeTab(downEvent, slideItemId);
                 return;
             }
@@ -534,6 +572,7 @@ export class SlideTabBar {
             const activeSlideItemElement = this._activeTabItem.getSlideTabItem();
             activeSlideItemElement?.setPointerCapture((downEvent as PointerEvent).pointerId);
             this._activeTabItem?.addEventListener('pointerup', this._upAction);
+            this._activeTabItem.addEventListener('pointercancel', this._cancelAction); // Carenode sheet-tab-press-end: see _cancelAction
 
             const { x, width } = this._activeTabItem.getBoundingRect();
             const { x: containerX, width: containerWidth } = this.getBoundingRect();
@@ -571,6 +610,11 @@ export class SlideTabBar {
         // Set a timer to delay dragging for 300 milliseconds
         this._longPressTimer = setTimeout(() => {
             if (!activeSlideItemElement || this._activeTabItem?.isEditMode()) return;
+            // Carenode sheet-tab-press-end: long-press only while the press that armed it is still held. The capture taken
+            // on pointerdown is released when that pointer ends or the tab leaves the document, so a press that ended
+            // unheard (the tab re-rendered under the finger) neither recaptures a dead pointer (NotFoundError) nor pins
+            // the tab.
+            if (!activeSlideItemElement.hasPointerCapture((downEvent as PointerEvent).pointerId)) return;
 
             this._activeTabItem?.enableFixed();
             this._startAutoScroll();
@@ -808,6 +852,13 @@ export class SlideTabBar {
     }
 
     destroy() {
+        // Carenode sheet-tab-press-end: a press still held when the bar goes away (the workbook remounts under the
+        // finger) leaves its long-press timer and the auto-scroll frame loop behind, and nothing else stops them.
+        if (this._longPressTimer) {
+            clearTimeout(this._longPressTimer);
+            this._longPressTimer = null;
+        }
+        this._closeAutoScroll();
         this.removeListener();
 
         this._downActionX = 0;
