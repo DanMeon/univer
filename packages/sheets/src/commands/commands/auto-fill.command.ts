@@ -14,17 +14,21 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — dragging the fill handle back re-measures the cleared rows (CNT-4497 autofill-row-height)
+
 import type { IAccessor, ICommand, IRange } from '@univerjs/core';
+import { CommandType, ICommandService, IUndoRedoService, IUniverInstanceService, sequenceExecute } from '@univerjs/core';
 import type { ISetRangeValuesMutationParams } from '../mutations/set-range-values.mutation';
 import type { ISheetCommandSharedParams } from '../utils/interface';
-import { CommandType, ICommandService, IUndoRedoService, IUniverInstanceService, sequenceExecute } from '@univerjs/core';
 import { generateNullCellValue } from '../../basics/utils';
 import { IAutoFillService } from '../../services/auto-fill/auto-fill.service';
 import { AUTO_FILL_APPLY_TYPE } from '../../services/auto-fill/type';
 import { SheetsSelectionsService } from '../../services/selections';
 import { SheetInterceptorService } from '../../services/sheet-interceptor/sheet-interceptor.service';
+import { SheetSkeletonService } from '../../skeleton/skeleton.service';
 import { SetRangeValuesMutation, SetRangeValuesUndoMutationFactory } from '../mutations/set-range-values.mutation';
 import { SetSelectionsOperation } from '../operations/selection.operation';
+import { getSuitableRangesInView } from './util';
 import { getSheetCommandTarget } from './utils/target-util';
 
 export interface IAutoFillCommandParams extends Partial<ISheetCommandSharedParams> {
@@ -220,12 +224,28 @@ export const AutoClearContentCommand: ICommand = {
 
             sequenceExecute(afterInterceptors.redos, commandService);
 
+            // Carenode CNT-4497 autofill-row-height: dragging the fill handle back inside the source clears cells; their
+            // rows go to the row calculation the way ClearSelectionContentCommand sends them (upstream left a cleared
+            // 3-line row at its old height).
+            const { suitableRanges, remainingRanges } = getSuitableRangesInView(
+                [clearRange],
+                accessor.get(SheetSkeletonService).getSkeleton(unitId, subUnitId)
+            );
+            const autoHeight = sheetInterceptorService.generateMutationsOfAutoHeight({
+                unitId,
+                subUnitId,
+                ranges: suitableRanges,
+                autoHeightRanges: suitableRanges,
+                lazyAutoHeightRanges: remainingRanges,
+            });
+            sequenceExecute(autoHeight.redos, commandService);
+
             undoRedoService.pushUndoRedo({
                 // If there are multiple mutations that form an encapsulated project, they must be encapsulated in the same undo redo element.
                 // Hooks can be used to hook the code of external controllers to add new actions.
                 unitID: unitId,
-                undoMutations: [...undos, ...afterInterceptors.undos],
-                redoMutations: [...redos, ...afterInterceptors.redos],
+                undoMutations: [...undos, ...afterInterceptors.undos, ...autoHeight.undos],
+                redoMutations: [...redos, ...afterInterceptors.redos, ...autoHeight.redos],
             });
 
             return true;

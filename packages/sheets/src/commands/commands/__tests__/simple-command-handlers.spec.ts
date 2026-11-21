@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the fill-handle clear case also expects the cleared rows re-measured (CNT-4497 autofill-row-height)
+
 import type { IAccessor } from '@univerjs/core';
 import {
     CellValueType,
@@ -394,6 +396,7 @@ describe('AutoFillCommand family', () => {
     it('clears dragged content, restores selection on undo, and runs after-interceptor mutations', async () => {
         const executed: unknown[] = [];
         const undoRecords: unknown[] = [];
+        const autoHeightContexts: unknown[] = [];
         const oldSelection = { range: { startRow: 9, endRow: 9, startColumn: 9, endColumn: 9 } };
         const cellMatrix = new ObjectMatrix({ 2: { 2: { v: 'old' } } });
         const worksheet = {
@@ -408,7 +411,15 @@ describe('AutoFillCommand family', () => {
             [IUndoRedoService, { pushUndoRedo: (record: unknown) => undoRecords.push(record) }],
             [IUniverInstanceService, createUniverInstanceService(worksheet)],
             [SheetsSelectionsService, { getCurrentLastSelection: () => oldSelection }],
-            [SheetInterceptorService, { afterCommandExecute: () => ({ redos: [{ id: 'after-redo', params: {} }], undos: [{ id: 'after-undo', params: {} }] }) }],
+            [SheetInterceptorService, {
+                afterCommandExecute: () => ({ redos: [{ id: 'after-redo', params: {} }], undos: [{ id: 'after-undo', params: {} }] }),
+                // Carenode CNT-4497 autofill-row-height: the cleared rows go to the row calculation.
+                generateMutationsOfAutoHeight: (ctx: { ranges: unknown[] }) => {
+                    autoHeightContexts.push(ctx);
+                    return { redos: [{ id: 'auto-height-redo', params: {} }], undos: [{ id: 'auto-height-undo', params: {} }] };
+                },
+            }],
+            [SheetSkeletonService, { getSkeleton: () => null }],
         ]));
 
         await expect(AutoClearContentCommand.handler(accessor, {
@@ -418,12 +429,15 @@ describe('AutoFillCommand family', () => {
         expect((executed[0] as { id: string }).id).toBe(SetRangeValuesMutation.id);
         expect((executed[1] as { id: string }).id).toBe(SetSelectionsOperation.id);
         expect((executed[2] as { id: string }).id).toBe('after-redo');
+        expect((executed[3] as { id: string }).id).toBe('auto-height-redo');
+        expect(autoHeightContexts).toMatchObject([{ ranges: [{ startRow: 2, endRow: 2, startColumn: 2, endColumn: 3 }] }]);
         expect(undoRecords[0]).toMatchObject({
             unitID: 'unit-1',
             undoMutations: [
                 { id: SetRangeValuesMutation.id },
                 { id: SetSelectionsOperation.id, params: { selections: [oldSelection], unitId: 'unit-1', subUnitId: 'sheet-1' } },
                 { id: 'after-undo' },
+                { id: 'auto-height-undo' },
             ],
         });
     });
