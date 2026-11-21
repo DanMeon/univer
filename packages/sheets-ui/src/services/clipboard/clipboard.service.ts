@@ -15,6 +15,7 @@
  */
 
 // Modified by Carenode, 2026 — CNT-3483 (b'): paste-range resolver seam in _getPastedRange.
+// Modified by Carenode, 2026 — CNT-3483 (b') CUT bypass: a cut paste keeps the upstream range.
 
 import type {
     ICellData,
@@ -1004,7 +1005,9 @@ export class SheetClipboardService extends Disposable implements ISheetClipboard
                 }
             });
         }
-        const pasteTarget = this._getPastedRange(cellMatrix, target);
+        // Carenode CNT-3483 (b') CUT keeps the upstream range: a cut pastes through the move-range branch, which ignores
+        // the matrix spans the resolver would map onto the merge grid.
+        const pasteTarget = cachedData.copyType === COPY_TYPE.CUT ? this._getPastedRangeStock(cellMatrix, target) : this._getPastedRange(cellMatrix, target);
         if (!pasteTarget) {
             return false;
         }
