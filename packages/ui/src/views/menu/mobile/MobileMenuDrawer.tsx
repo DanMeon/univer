@@ -14,15 +14,17 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the drawer scrolls back to the top whenever its menu opens or leaves a nested view
+
 import type { ComponentProps } from 'react';
-import type { LocaleKey } from '../../../locale/types';
-import type { IMenuSchema } from '../../../services/menu/menu-manager.service';
-import type { MobileDrawerSnap } from '../../components/mobile-drawer/MobileDrawer';
 import { LocaleService } from '@univerjs/core';
 import { clsx, ConfigContext, resetButtonClassName } from '@univerjs/design';
 import { CloseIcon, MoreLeftIcon } from '@univerjs/icons';
-import { useContext, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import type { LocaleKey } from '../../../locale/types';
+import type { IMenuSchema } from '../../../services/menu/menu-manager.service';
+import type { MobileDrawerSnap } from '../../components/mobile-drawer/MobileDrawer';
 import { IMenuManagerService } from '../../../services/menu/menu-manager.service';
 import { useDependency, useObservable } from '../../../utils/di';
 import { MobileDrawer } from '../../components/mobile-drawer/MobileDrawer';
@@ -55,6 +57,16 @@ function MobileMenuDrawerContent(props: IMobileMenuDrawerProps) {
     const direction = useObservable(localeService.direction$);
     const { mountContainer } = useContext(ConfigContext);
     const layerRef = useRef<HTMLDivElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
+
+    // Carenode: `MobileMenu` swaps the list inside the drawer's one scroll area when it opens or leaves a nested
+    // view, so a view opened after the user scrolled the parent list started scrolled down and hid its first items.
+    // `MobileSheetActionPanel` resets the same area on a nested view change. `MobileMenu` sends a new navigation
+    // object (or `null` at the root) for every view change, so it is the key — a title would miss two nested views
+    // that share one.
+    useEffect(() => {
+        if (contentRef.current) contentRef.current.scrollTop = 0;
+    }, [navigation]);
 
     if (!mountContainer) {
         return null;
@@ -77,6 +89,7 @@ function MobileMenuDrawerContent(props: IMobileMenuDrawerProps) {
             />
             <MobileDrawer
                 layerRef={layerRef}
+                contentRef={contentRef}
                 componentName="mobile-menu-drawer"
                 snap={drawerSnap}
                 expandLabel={localeService.t<LocaleKey>('ui.ribbon.more')}
