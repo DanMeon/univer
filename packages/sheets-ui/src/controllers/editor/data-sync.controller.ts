@@ -14,16 +14,29 @@
  * limitations under the License.
  */
 
-// Modified by Carenode, 2026 — CNT-5176: a number format set on or removed from the edit cell rebuilds its closed editor snapshot
+// Modified by Carenode, 2026 — CNT-5176: a number format set on or removed from the edit cell, and a row or column insert, removal or move and a reorder that put another cell at the edit cell coordinates, rebuild its closed editor snapshot
 
-import type { DocumentDataModel, ICommandInfo, IDocumentBody, IDocumentStyle, IDrawings, IParagraph, IRange, Nullable } from '@univerjs/core';
+import type {
+    DocumentDataModel,
+    ICommandInfo,
+    IDocumentBody,
+    IDocumentStyle,
+    IDrawings,
+    IMutationInfo,
+    IParagraph,
+    IRange,
+    Nullable,
+} from '@univerjs/core';
 import type { IRichTextEditingMutationParams } from '@univerjs/docs';
 import type { DocumentViewModel } from '@univerjs/engine-render';
 import type {
     IMoveRangeMutationParams,
     IRemoveNumfmtMutationParams,
+    IReorderRangeMutationParams,
     ISetNumfmtMutationParams,
     ISetRangeValuesMutationParams,
+    ISheetCommandSharedParams,
+    MutationsAffectRange,
 } from '@univerjs/sheets';
 import {
     BooleanNumber,
@@ -49,9 +62,17 @@ import { DocSkeletonManagerService, RichTextEditingMutation } from '@univerjs/do
 import { ReplaceSnapshotCommand } from '@univerjs/docs-ui';
 import { IRenderManagerService } from '@univerjs/engine-render';
 import {
+    adjustRangeOnMutation,
+    InsertColMutation,
+    InsertRowMutation,
+    MoveColsMutation,
     MoveRangeMutation,
+    MoveRowsMutation,
     RangeProtectionRuleModel,
+    RemoveColMutation,
     RemoveNumfmtMutation,
+    RemoveRowMutation,
+    ReorderRangeMutation,
     SetNumfmtMutation,
     SetRangeValuesMutation,
     WorksheetProtectionRuleModel,
@@ -88,6 +109,33 @@ const formulaEditorStyle: IDocumentStyle = {
  * so a style-only write must not invalidate an open draft.
  */
 const CELL_CONTENT_KEYS = new Set(['v', 't', 'f', 'si', 'p']);
+
+/**
+ * Mutations that insert, remove or move whole rows or columns. They do not write cells; they shift them to
+ * other coordinates, so the edit cell coordinates hold another cell afterwards when their cell is moved away.
+ */
+const CELL_SHIFTING_MUTATION_IDS = new Set([
+    InsertRowMutation.id,
+    InsertColMutation.id,
+    RemoveRowMutation.id,
+    RemoveColMutation.id,
+    MoveRowsMutation.id,
+    MoveColsMutation.id,
+]);
+
+/**
+ * Sheet mutations after which the closed editor snapshot of the edit cell may describe another content. These
+ * are the mutations of `@univerjs/sheets` that write or move cell content (the cell matrix) or the number format
+ * the editor text is built with; `_shouldRefreshCurrentEditCell` decides whether one reaches the edit cell.
+ */
+const EDIT_CELL_CONTENT_MUTATION_IDS = new Set([
+    SetRangeValuesMutation.id,
+    MoveRangeMutation.id,
+    SetNumfmtMutation.id,
+    RemoveNumfmtMutation.id,
+    ReorderRangeMutation.id,
+    ...CELL_SHIFTING_MUTATION_IDS,
+]);
 
 /**
  * sync data between cell editor and formula editor
@@ -193,19 +241,14 @@ export class EditorDataSyncController extends Disposable {
         );
 
         /**
-         * Update formula bar content when you call SetRangeValuesMutation and MoveRangeMutation, and when a
-         * number format is set or removed: the editor text of a cell depends on its number format (a date
-         * serial is edited as a date), and the number format mutations write the cell style directly.
+         * Update formula bar content when you call SetRangeValuesMutation and MoveRangeMutation, when a number
+         * format is set or removed (the editor text of a cell depends on its number format: a date serial is
+         * edited as a date, and the number format mutations write the cell style directly), and when rows or
+         * columns are inserted, removed, moved or reordered so that another cell sits at the edit cell coordinates.
          */
-        const needUpdateFormulaEditorContentCommandList = [
-            SetRangeValuesMutation.id,
-            MoveRangeMutation.id,
-            SetNumfmtMutation.id,
-            RemoveNumfmtMutation.id,
-        ];
         this.disposeWithMe(
             this._commandService.onCommandExecuted((command: ICommandInfo) => {
-                if (!needUpdateFormulaEditorContentCommandList.includes(command.id)) {
+                if (!EDIT_CELL_CONTENT_MUTATION_IDS.has(command.id)) {
                     return;
                 }
 
@@ -230,7 +273,8 @@ export class EditorDataSyncController extends Disposable {
 
                 /**
                  * Refresh the current edit-cell snapshot so both the hidden cell editor and
-                 * the formula bar stay aligned with external cell mutations.
+                 * the formula bar stay aligned with external cell mutations. It is rebuilt from the
+                 * selected cell, which also keeps the edit location (where an edit is submitted) on it.
                  */
                 this._editorBridgeService.refreshEditCellState();
             })
@@ -266,13 +310,43 @@ export class EditorDataSyncController extends Disposable {
                 && this._hasRangeCell(params.ranges, row, column);
         }
 
+        if (CELL_SHIFTING_MUTATION_IDS.has(command.id) && command.params) {
+            const params = command.params as ISheetCommandSharedParams;
+            return this._isEditedUnit(editCell, params.unitId, params.subUnitId)
+                && this._shiftsCellAway(command as IMutationInfo<MutationsAffectRange>, row, column);
+        }
+
+        if (command.id === ReorderRangeMutation.id && command.params) {
+            const params = command.params as IReorderRangeMutationParams;
+            // The mutation copies the cell of row `order[row]` into `row` for every column of the range.
+            return this._isEditedUnit(editCell, params.unitId, params.subUnitId)
+                && this._hasRangeCell([params.range], row, column)
+                && Object.prototype.hasOwnProperty.call(params.order, row)
+                && params.order[row] !== row;
+        }
+
         return false;
+    }
+
+    /**
+     * Whether a row or column insert, removal or move takes the cell at the given coordinates elsewhere or
+     * removes it. Such a mutation only shifts whole rows or columns, so the coordinates hold the same cell
+     * afterwards exactly when their cell stays there. `adjustRangeOnMutation` is the sheets rule for where a
+     * range goes on these mutations (the open editor follows its cell with it too).
+     */
+    private _shiftsCellAway(mutation: IMutationInfo<MutationsAffectRange>, row: number, column: number): boolean {
+        const cell: IRange = { startRow: row, endRow: row, startColumn: column, endColumn: column };
+        const shifted = adjustRangeOnMutation(cell, mutation);
+        return shifted == null || !Rectangle.equals(shifted, cell);
     }
 
     /**
      * Whether a matched mutation replaces the edited cell's content. Moving cells into or out of the edited
      * cell does; a style-only write does not, because the editor does not own the cell style it renders with.
      * Setting or removing a number format is such a style-only write: the mutations only change `s.n`.
+     * Row and column shifts and reorders are not counted: a shift moves the edited cell rather than writing it,
+     * and the open editor follows it (EditingRenderController moves the edit location); a reorder keeps the open
+     * editor on its coordinates with its draft, as before.
      */
     private _writesCellContent(command: ICommandInfo, editCell: ICellEditorState): boolean {
         // MoveRange only reaches this point when it writes or clears the edited cell's coordinates.

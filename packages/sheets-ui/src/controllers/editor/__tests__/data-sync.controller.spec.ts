@@ -14,13 +14,14 @@
  * limitations under the License.
  */
 
-// Modified by Carenode, 2026 — CNT-5176: cases for the edit cell snapshot after a number format is set or removed
+// Modified by Carenode, 2026 — CNT-5176: cases for the edit cell snapshot after a number format is set or removed, and after rows or columns are inserted, removed, moved or reordered
 
 import type { ICommandInfo, IDocumentBody, IDocumentData, IDrawings, IRange, Nullable } from '@univerjs/core';
 import type { IRemoveNumfmtMutationParams, ISetNumfmtMutationParams } from '@univerjs/sheets';
 import {
     BooleanNumber,
     CellValueType,
+    CommandType,
     DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
     DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
     DocumentDataModel,
@@ -31,14 +32,23 @@ import {
     IUniverInstanceService,
     ThemeService,
 } from '@univerjs/core';
+import { DocStateChangeManagerService } from '@univerjs/docs';
+import { IFunctionService, LexerTreeBuilder } from '@univerjs/engine-formula';
 import { DeviceInputEventType, IRenderManagerService } from '@univerjs/engine-render';
 import {
     BEFORE_CELL_EDIT,
+    InsertColMutation,
+    InsertRowMutation,
     INumfmtService,
+    MoveColsMutation,
     MoveRangeMutation,
+    MoveRowsMutation,
     NumfmtService,
     RangeProtectionRuleModel,
+    RemoveColMutation,
     RemoveNumfmtMutation,
+    RemoveRowMutation,
+    ReorderRangeMutation,
     SetNumfmtMutation,
     SetRangeValuesMutation,
     SheetInterceptorService,
@@ -47,10 +57,14 @@ import {
 import { BehaviorSubject, EMPTY } from 'rxjs';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { ICellEditorState } from '../../../services/editor-bridge.service';
+import { ScrollToRangeOperation } from '../../../commands/operations/scroll-to-range.operation';
 import { IEditorBridgeService } from '../../../services/editor-bridge.service';
+import { CellEditorManagerService, ICellEditorManagerService } from '../../../services/editor/cell-editor-manager.service';
+import { SheetCellEditorResizeService } from '../../../services/editor/cell-editor-resize.service';
 import { IFormulaEditorManagerService } from '../../../services/editor/formula-editor-manager.service';
 import { createChartRenderTestBed } from '../../render-controllers/__tests__/chart-render-test-bed';
 import { EditorDataSyncController } from '../data-sync.controller';
+import { EditingRenderController } from '../editing.render-controller';
 import { FormulaEditorController } from '../formula-editor.controller';
 
 interface ITestableEditorDataSyncController {
@@ -99,6 +113,60 @@ const NUMFMT_ELSEWHERE_CASES = [
     { target: 'another cell', unitId: 'test-unit', subUnitId: 'sheet1', range: { startRow: 1, endRow: 3, startColumn: 3, endColumn: 4 } },
     { target: 'the same cell of another sheet', unitId: 'test-unit', subUnitId: 'sheet2', range: EDITED_CELL_RANGE },
     { target: 'the same cell of another workbook', unitId: 'other-unit', subUnitId: 'sheet1', range: EDITED_CELL_RANGE },
+];
+
+interface ISheetTarget {
+    unitId: string;
+    subUnitId: string;
+}
+
+const EDITED_SHEET: ISheetTarget = { unitId: 'test-unit', subUnitId: 'sheet1' };
+
+function rows(startRow: number, endRow = startRow): IRange {
+    return { startRow, endRow, startColumn: 0, endColumn: 19 };
+}
+
+function columns(startColumn: number, endColumn = startColumn): IRange {
+    return { startRow: 0, endRow: 49, startColumn, endColumn };
+}
+
+type StructureCommand = (target: ISheetTarget) => ICommandInfo;
+
+const insertRows = (range: IRange): StructureCommand => (target) => ({ id: InsertRowMutation.id, params: { ...target, range } });
+const insertColumns = (range: IRange): StructureCommand => (target) => ({ id: InsertColMutation.id, params: { ...target, range } });
+const removeRows = (range: IRange): StructureCommand => (target) => ({ id: RemoveRowMutation.id, params: { ...target, range } });
+const removeColumns = (range: IRange): StructureCommand => (target) => ({ id: RemoveColMutation.id, params: { ...target, range } });
+const moveRows = (sourceRange: IRange, targetRange: IRange): StructureCommand => (target) => ({ id: MoveRowsMutation.id, params: { ...target, sourceRange, targetRange } });
+const moveColumns = (sourceRange: IRange, targetRange: IRange): StructureCommand => (target) => ({ id: MoveColsMutation.id, params: { ...target, sourceRange, targetRange } });
+const reorder = (range: IRange, order: Record<number, number>): StructureCommand => (target) => ({ id: ReorderRangeMutation.id, params: { ...target, range, order } });
+
+/** Row and column changes after which another cell sits at row 1, column 2 (the edit cell of `createController`). */
+const SHIFTS_EDITED_CELL_CASES: Array<{ change: string; command: StructureCommand }> = [
+    { change: 'a row is inserted above it', command: insertRows(rows(0)) },
+    { change: 'a row is inserted at its row', command: insertRows(rows(1)) },
+    { change: 'a column is inserted at its column', command: insertColumns(columns(2)) },
+    { change: 'its row is removed', command: removeRows(rows(1)) },
+    { change: 'a row above it is removed', command: removeRows(rows(0)) },
+    { change: 'its column is removed', command: removeColumns(columns(2)) },
+    { change: 'a column before it is removed', command: removeColumns(columns(0, 1)) },
+    { change: 'its row is moved down', command: moveRows(rows(1), rows(4)) },
+    { change: 'a row below it is moved above it', command: moveRows(rows(3), rows(0)) },
+    { change: 'its column is moved right', command: moveColumns(columns(2), columns(5)) },
+    { change: 'a column after it is moved before it', command: moveColumns(columns(4), columns(1)) },
+    { change: 'its row takes another row in a reorder', command: reorder({ startRow: 0, endRow: 3, startColumn: 0, endColumn: 4 }, { 1: 3, 3: 1 }) },
+];
+
+/** Row and column changes that keep the cell at row 1, column 2 where it is. */
+const KEEPS_EDITED_CELL_CASES: Array<{ change: string; command: StructureCommand }> = [
+    { change: 'a row is inserted below it', command: insertRows(rows(2)) },
+    { change: 'a column is inserted after it', command: insertColumns(columns(3)) },
+    { change: 'rows below it are removed', command: removeRows(rows(2, 4)) },
+    { change: 'a column after it is removed', command: removeColumns(columns(3)) },
+    { change: 'rows below it are moved', command: moveRows(rows(3), rows(6)) },
+    { change: 'columns after it are moved', command: moveColumns(columns(4), columns(8)) },
+    { change: 'a reorder leaves its row out', command: reorder({ startRow: 0, endRow: 3, startColumn: 0, endColumn: 4 }, { 0: 3, 3: 0 }) },
+    { change: 'a reorder keeps its row in place', command: reorder({ startRow: 0, endRow: 3, startColumn: 0, endColumn: 4 }, { 1: 1 }) },
+    { change: 'a reorder covers other columns', command: reorder({ startRow: 0, endRow: 3, startColumn: 3, endColumn: 4 }, { 1: 3, 3: 1 }) },
 ];
 
 describe('EditorDataSyncController', () => {
@@ -688,6 +756,40 @@ describe('EditorDataSyncController', () => {
         expect(editorBridgeService.refreshEditCellState).not.toHaveBeenCalled();
     });
 
+    it.each(SHIFTS_EDITED_CELL_CASES)('refreshes the current edit cell when $change', ({ command }) => {
+        const { commandService, editorBridgeService } = createController();
+
+        commandService.emit(command(EDITED_SHEET));
+
+        expect(editorBridgeService.refreshEditCellState).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(KEEPS_EDITED_CELL_CASES)('ignores a row or column change when $change', ({ command }) => {
+        const { commandService, editorBridgeService } = createController();
+
+        commandService.emit(command(EDITED_SHEET));
+
+        expect(editorBridgeService.refreshEditCellState).not.toHaveBeenCalled();
+    });
+
+    it.each(SHIFTS_EDITED_CELL_CASES)('ignores the same change on another sheet or workbook when $change', ({ command }) => {
+        const { commandService, editorBridgeService } = createController();
+
+        commandService.emit(command({ unitId: 'test-unit', subUnitId: 'sheet2' }));
+        commandService.emit(command({ unitId: 'other-unit', subUnitId: 'sheet1' }));
+
+        expect(editorBridgeService.refreshEditCellState).not.toHaveBeenCalled();
+    });
+
+    it.each(SHIFTS_EDITED_CELL_CASES)('leaves the open editor untouched when $change', ({ command }) => {
+        const { commandService, editorBridgeService } = createController({ isEditorVisible: true });
+
+        commandService.emit(command(EDITED_SHEET));
+
+        expect(editorBridgeService.changeEditorDirty).not.toHaveBeenCalled();
+        expect(editorBridgeService.refreshEditCellState).not.toHaveBeenCalled();
+    });
+
     it('renders formula reference styles in the cell editor when the cell editor is focused', () => {
         const { controller } = createController();
         const cellEditorSnapshot: IDocumentData = {
@@ -975,5 +1077,155 @@ describe('EditorDataSyncController number format refresh with real sheet provide
         expect(editedDocumentModel()).toBe(draftDocumentModel);
         expect(editedBody()).toBe(`${SERIAL}\r\n`);
         expect(bridge.getEditorDirty()).toBe(false);
+    });
+});
+
+describe('EditorDataSyncController row and column change refresh with real sheet providers', () => {
+    /** B13:D17 of the grid sheet; C14 (row 13, column 2) is the selected cell. */
+    const BLOCK = [
+        ['b13', 'c13', 'd13'],
+        ['b14', 'c14', 'd14'],
+        ['b15', 'c15', 'd15'],
+        ['b16', 'c16', 'd16'],
+        ['b17', 'c17', 'd17'],
+    ];
+    const SELECTED = { row: 13, column: 2 };
+    const C14_TO_C16 = { startRow: 13, endRow: 15, startColumn: 2, endColumn: 2 };
+
+    function createStructureController() {
+        const { injector, workbook, render, manager, commands } = createChartRenderTestBed();
+        const worksheet = workbook.getSheetBySheetId('grid')!;
+        const unitId = workbook.getUnitId();
+
+        injector.add([FormulaEditorController, { useValue: { autoScroll: vi.fn() } as never }]);
+        injector.add([IFormulaEditorManagerService, { useValue: { getPosition: () => null } as never }]);
+        injector.add([RangeProtectionRuleModel, { useValue: { getRangeRuleInitState: () => true } as never }]);
+        injector.add([WorksheetProtectionRuleModel, { useValue: { getSheetRuleInitState: () => true } as never }]);
+        injector.add([EditorDataSyncController]);
+        // EditingRenderController also listens to row and column changes (an open editor follows its cell). The
+        // sheets-ui plugins create it after EditorDataSyncController, so its listener runs second here as well.
+        injector.add([ICellEditorManagerService, { useClass: CellEditorManagerService }]);
+        injector.add([LexerTreeBuilder]);
+        injector.add([IFunctionService, { useValue: { getDescriptions: () => ({}) } as never }]);
+        injector.add([SheetCellEditorResizeService, { useValue: { resizeCellEditor: vi.fn(), fitTextSize: vi.fn() } as never }]);
+        injector.add([DocStateChangeManagerService, { useValue: { clearHistory: vi.fn() } as never }]);
+        injector.add([EditingRenderController]);
+
+        [
+            InsertRowMutation,
+            InsertColMutation,
+            RemoveRowMutation,
+            RemoveColMutation,
+            MoveRowsMutation,
+            MoveColsMutation,
+            ReorderRangeMutation,
+        ].forEach((mutation) => commands.registerCommand(mutation));
+        // Opening the editor scrolls to the edit cell; the scroll render controller is not part of this bed.
+        commands.registerCommand({ id: ScrollToRangeOperation.id, type: CommandType.OPERATION, handler: () => true });
+        workbook.addWorksheet('other', 2, { id: 'other', name: 'other', rowCount: 50, columnCount: 20 });
+        manager.setCurrent({ sheetId: 'grid' });
+        BLOCK.forEach((values, rowOffset) => values.forEach((value, columnOffset) => {
+            worksheet.getCellMatrix().setValue(12 + rowOffset, 1 + columnOffset, { v: value });
+        }));
+
+        const controller = injector.get(EditorDataSyncController);
+        const editingController = injector.get(EditingRenderController);
+        onTestFinished(() => {
+            editingController.dispose();
+            controller.dispose();
+        });
+
+        const bridge = injector.get(IEditorBridgeService);
+        bridge.setEditCell({
+            unitId,
+            sheetId: 'grid',
+            scene: render.scene,
+            engine: render.engine,
+            primary: worksheet.getCellInfoInMergeData(SELECTED.row, SELECTED.column),
+        });
+        bridge.changeVisible({ visible: false, eventType: DeviceInputEventType.Keyboard, unitId });
+
+        return {
+            bridge,
+            unitId,
+            worksheet,
+            editedDocumentModel: () => bridge.getEditCellState()?.documentLayoutObject.documentModel,
+            editedBody: () => bridge.getEditCellState()?.documentLayoutObject.documentModel?.getBody()?.dataStream,
+            editLocation: () => {
+                const location = bridge.getEditLocation();
+                return location && { row: location.row, column: location.column };
+            },
+            run: (command: StructureCommand, subUnitId = 'grid') => {
+                const { id, params } = command({ unitId, subUnitId });
+                expect(commands.syncExecuteCommand(id, params)).toBe(true);
+            },
+        };
+    }
+
+    it.each([
+        { change: 'the selected row is removed', command: removeRows(rows(13)), text: 'c15' },
+        { change: 'the row above the selected cell is removed', command: removeRows(rows(12)), text: 'c15' },
+        { change: 'the selected column is removed', command: removeColumns(columns(2)), text: 'd14' },
+        { change: 'the column before the selected cell is removed', command: removeColumns(columns(1)), text: 'd14' },
+        { change: 'the selected row is moved two rows down', command: moveRows(rows(13), rows(16)), text: 'c15' },
+        { change: 'the next row is moved above the selected row', command: moveRows(rows(14), rows(13)), text: 'c15' },
+        { change: 'the selected column is moved one column right', command: moveColumns(columns(2), columns(4)), text: 'd14' },
+        { change: 'the next column is moved before the selected column', command: moveColumns(columns(3), columns(2)), text: 'd14' },
+        { change: 'a reorder puts the next row into the selected row', command: reorder(C14_TO_C16, { 13: 14, 14: 15, 15: 13 }), text: 'c15' },
+        { change: 'a row is inserted above the selected row', command: insertRows(rows(13)), text: '' },
+        { change: 'a column is inserted before the selected column', command: insertColumns(columns(2)), text: '' },
+    ])('shows what the selected cell holds in a closed cell editor once $change', ({ command, text }) => {
+        const { worksheet, editedBody, editLocation, run } = createStructureController();
+        expect(editedBody()).toBe('c14\r\n');
+
+        run(command);
+
+        expect(worksheet.getCellRaw(SELECTED.row, SELECTED.column)?.v ?? '').toBe(text);
+        // Opening the editor on the selected cell reuses this snapshot and submits to this location.
+        expect(editedBody()).toBe(`${text}\r\n`);
+        expect(editLocation()).toEqual(SELECTED);
+    });
+
+    it.each([
+        { change: 'a row below the selected cell is removed', command: removeRows(rows(20)), subUnitId: 'grid' },
+        { change: 'rows below the selected cell are moved', command: moveRows(rows(20), rows(25)), subUnitId: 'grid' },
+        { change: 'the row above the same cell of another sheet is removed', command: removeRows(rows(12)), subUnitId: 'other' },
+        { change: 'a column is inserted before the same cell of another sheet', command: insertColumns(columns(2)), subUnitId: 'other' },
+    ])('keeps the closed cell editor snapshot when $change', ({ command, subUnitId }) => {
+        const { editedDocumentModel, editedBody, editLocation, run } = createStructureController();
+        const snapshot = editedDocumentModel();
+
+        run(command, subUnitId);
+
+        expect(editedDocumentModel()).toBe(snapshot);
+        expect(editedBody()).toBe('c14\r\n');
+        expect(editLocation()).toEqual(SELECTED);
+    });
+
+    it('keeps the open draft clean and follows the edited cell when the row above it is removed', () => {
+        const { bridge, unitId, editedDocumentModel, editedBody, editLocation, run } = createStructureController();
+        bridge.changeVisible({ visible: true, eventType: DeviceInputEventType.Keyboard, unitId });
+        const draftDocumentModel = editedDocumentModel();
+
+        run(removeRows(rows(12)));
+
+        expect(editedDocumentModel()).toBe(draftDocumentModel);
+        expect(editedBody()).toBe('c14\r\n');
+        expect(bridge.getEditorDirty()).toBe(false);
+        // The edited cell moved up one row, and the open editor still submits to it.
+        expect(editLocation()).toEqual({ row: 12, column: 2 });
+    });
+
+    it('keeps the open draft clean on its coordinates when a reorder puts another row there', () => {
+        const { bridge, unitId, editedDocumentModel, editedBody, editLocation, run } = createStructureController();
+        bridge.changeVisible({ visible: true, eventType: DeviceInputEventType.Keyboard, unitId });
+        const draftDocumentModel = editedDocumentModel();
+
+        run(reorder(C14_TO_C16, { 13: 14, 14: 15, 15: 13 }));
+
+        expect(editedDocumentModel()).toBe(draftDocumentModel);
+        expect(editedBody()).toBe('c14\r\n');
+        expect(bridge.getEditorDirty()).toBe(false);
+        expect(editLocation()).toEqual(SELECTED);
     });
 });

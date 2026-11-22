@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176: only an open editor follows its cell on row and column inserts, removals and moves
+
 import type {
     DocumentDataModel,
     ICellData,
@@ -334,6 +336,10 @@ export class EditingRenderController extends Disposable {
                 case InsertColMutation.id:
                 case InsertRowMutation.id:
                 {
+                    // Only an open editor follows its cell. A closed editor edits the selected cell, and
+                    // EditorDataSyncController rebuilds its state from the selection after these mutations;
+                    // moving the location here as well would point it away from the selected cell again.
+                    if (!this._editorBridgeService.isVisible().visible) break;
                     const editLocation = this._editorBridgeService.getEditLocation();
                     if (!editLocation) break;
                     const currentRange = {
