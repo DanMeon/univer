@@ -14,9 +14,13 @@
  * limitations under the License.
  */
 
-import type { ICommandInfo, IDocumentBody, IDocumentData, IDrawings, Nullable } from '@univerjs/core';
+// Modified by Carenode, 2026 — CNT-5176: cases for the edit cell snapshot after a number format is set or removed
+
+import type { ICommandInfo, IDocumentBody, IDocumentData, IDrawings, IRange, Nullable } from '@univerjs/core';
+import type { IRemoveNumfmtMutationParams, ISetNumfmtMutationParams } from '@univerjs/sheets';
 import {
     BooleanNumber,
+    CellValueType,
     DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
     DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
     DocumentDataModel,
@@ -29,9 +33,15 @@ import {
 } from '@univerjs/core';
 import { DeviceInputEventType, IRenderManagerService } from '@univerjs/engine-render';
 import {
+    BEFORE_CELL_EDIT,
+    INumfmtService,
     MoveRangeMutation,
+    NumfmtService,
     RangeProtectionRuleModel,
+    RemoveNumfmtMutation,
+    SetNumfmtMutation,
     SetRangeValuesMutation,
+    SheetInterceptorService,
     WorksheetProtectionRuleModel,
 } from '@univerjs/sheets';
 import { BehaviorSubject, EMPTY } from 'rxjs';
@@ -68,6 +78,28 @@ class TestCommandService {
         this._listeners.forEach((listener) => listener(command));
     }
 }
+
+function setNumfmtCommand(unitId: string, subUnitId: string, values: ISetNumfmtMutationParams['values']): ICommandInfo<ISetNumfmtMutationParams> {
+    const refMap: ISetNumfmtMutationParams['refMap'] = {};
+    Object.keys(values).forEach((id) => {
+        refMap[id] = { pattern: id === 'date' ? 'yyyy-mm-dd' : '@' };
+    });
+
+    return { id: SetNumfmtMutation.id, params: { unitId, subUnitId, values, refMap } };
+}
+
+function removeNumfmtCommand(unitId: string, subUnitId: string, ranges: IRange[]): ICommandInfo<IRemoveNumfmtMutationParams> {
+    return { id: RemoveNumfmtMutation.id, params: { unitId, subUnitId, ranges } };
+}
+
+/** The edit cell of `createController` is row 1, column 2 of `sheet1` in `test-unit`. */
+const EDITED_CELL_RANGE: IRange = { startRow: 1, endRow: 1, startColumn: 2, endColumn: 2 };
+
+const NUMFMT_ELSEWHERE_CASES = [
+    { target: 'another cell', unitId: 'test-unit', subUnitId: 'sheet1', range: { startRow: 1, endRow: 3, startColumn: 3, endColumn: 4 } },
+    { target: 'the same cell of another sheet', unitId: 'test-unit', subUnitId: 'sheet2', range: EDITED_CELL_RANGE },
+    { target: 'the same cell of another workbook', unitId: 'other-unit', subUnitId: 'sheet1', range: EDITED_CELL_RANGE },
+];
 
 describe('EditorDataSyncController', () => {
     const controllers: EditorDataSyncController[] = [];
@@ -605,6 +637,57 @@ describe('EditorDataSyncController', () => {
         expect(editorBridgeService.refreshEditCellState).not.toHaveBeenCalled();
     });
 
+    it('refreshes the current edit cell when a number format is set on a range that holds it', () => {
+        const { commandService, editorBridgeService } = createController();
+
+        commandService.emit(setNumfmtCommand('test-unit', 'sheet1', {
+            text: { ranges: [{ startRow: 5, endRow: 5, startColumn: 0, endColumn: 0 }] },
+            date: { ranges: [{ startRow: 0, endRow: 3, startColumn: 1, endColumn: 2 }] },
+        }));
+
+        expect(editorBridgeService.refreshEditCellState).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(NUMFMT_ELSEWHERE_CASES)('ignores a number format set on $target', ({ unitId, subUnitId, range }) => {
+        const { commandService, editorBridgeService } = createController();
+
+        commandService.emit(setNumfmtCommand(unitId, subUnitId, { date: { ranges: [range] } }));
+
+        expect(editorBridgeService.refreshEditCellState).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the current edit cell when the number format of a range that holds it is removed', () => {
+        const { commandService, editorBridgeService } = createController();
+
+        commandService.emit(removeNumfmtCommand('test-unit', 'sheet1', [
+            { startRow: 5, endRow: 5, startColumn: 0, endColumn: 0 },
+            { startRow: 1, endRow: 2, startColumn: 0, endColumn: 2 },
+        ]));
+
+        expect(editorBridgeService.refreshEditCellState).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(NUMFMT_ELSEWHERE_CASES)('ignores a number format removed from $target', ({ unitId, subUnitId, range }) => {
+        const { commandService, editorBridgeService } = createController();
+
+        commandService.emit(removeNumfmtCommand(unitId, subUnitId, [range]));
+
+        expect(editorBridgeService.refreshEditCellState).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        { change: 'set on', command: setNumfmtCommand('test-unit', 'sheet1', { date: { ranges: [EDITED_CELL_RANGE] } }) },
+        { change: 'removed from', command: removeNumfmtCommand('test-unit', 'sheet1', [EDITED_CELL_RANGE]) },
+    ])('leaves the open editor untouched when a number format is $change the edited cell', ({ command }) => {
+        const { commandService, editorBridgeService } = createController({ isEditorVisible: true });
+
+        commandService.emit(command);
+
+        // A number format is cell style, so the typed draft still describes the cell and is not marked as replaced.
+        expect(editorBridgeService.changeEditorDirty).not.toHaveBeenCalled();
+        expect(editorBridgeService.refreshEditCellState).not.toHaveBeenCalled();
+    });
+
     it('renders formula reference styles in the cell editor when the cell editor is focused', () => {
         const { controller } = createController();
         const cellEditorSnapshot: IDocumentData = {
@@ -785,6 +868,112 @@ describe('EditorDataSyncController cell refresh with real sheet providers', () =
             cellValue: { 0: { 0: { s: { bg: { rgb: '#ff0000' } } } } },
         });
 
+        expect(bridge.getEditorDirty()).toBe(false);
+    });
+});
+
+describe('EditorDataSyncController number format refresh with real sheet providers', () => {
+    const DATE_PATTERN = 'yyyy-mm-dd';
+    const SERIAL = 46350;
+    const SERIAL_AS_DATE = '2026-11-24';
+    const A1: IRange = { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 };
+
+    function createNumfmtController() {
+        const { injector, workbook, render, manager, commands } = createChartRenderTestBed();
+        const worksheet = workbook.getSheetBySheetId('grid')!;
+        const unitId = workbook.getUnitId();
+
+        injector.add([FormulaEditorController, { useValue: { autoScroll: vi.fn() } as never }]);
+        injector.add([IFormulaEditorManagerService, { useValue: { getPosition: () => null } as never }]);
+        injector.add([RangeProtectionRuleModel, { useValue: { getRangeRuleInitState: () => true } as never }]);
+        injector.add([WorksheetProtectionRuleModel, { useValue: { getSheetRuleInitState: () => true } as never }]);
+        injector.add([INumfmtService, { useClass: NumfmtService }]);
+        injector.add([EditorDataSyncController]);
+
+        commands.registerCommand(SetNumfmtMutation);
+        commands.registerCommand(RemoveNumfmtMutation);
+        manager.setCurrent({ sheetId: 'grid' });
+        worksheet.getCellMatrix().setValue(0, 0, { v: SERIAL, t: CellValueType.NUMBER });
+
+        const numfmtService = injector.get(INumfmtService);
+        // Stands in for NumfmtEditorController (sheets-numfmt-ui, which sheets-ui does not depend on):
+        // the editor text of a date serial is the date while the cell has a date format.
+        injector.get(SheetInterceptorService).writeCellInterceptor.intercept(BEFORE_CELL_EDIT, {
+            handler: (cell, context, next) => {
+                const numfmt = numfmtService.getValue(context.unitId, context.subUnitId, context.row, context.col);
+                const rawCell = context.worksheet.getCellRaw(context.row, context.col);
+                if (numfmt?.pattern === DATE_PATTERN && rawCell?.v === SERIAL) {
+                    return next({ ...rawCell, v: SERIAL_AS_DATE });
+                }
+
+                return next(cell);
+            },
+        });
+
+        const controller = injector.get(EditorDataSyncController);
+        onTestFinished(() => controller.dispose());
+
+        const bridge = injector.get(IEditorBridgeService);
+        bridge.setEditCell({
+            unitId,
+            sheetId: 'grid',
+            scene: render.scene,
+            engine: render.engine,
+            primary: worksheet.getCellInfoInMergeData(0, 0),
+        });
+        bridge.changeVisible({ visible: false, eventType: DeviceInputEventType.Keyboard, unitId });
+
+        return {
+            bridge,
+            numfmtService,
+            unitId,
+            editedDocumentModel: () => bridge.getEditCellState()?.documentLayoutObject.documentModel,
+            editedBody: () => bridge.getEditCellState()?.documentLayoutObject.documentModel?.getBody()?.dataStream,
+            setDateFormat: () => commands.syncExecuteCommand(SetNumfmtMutation.id, {
+                unitId,
+                subUnitId: 'grid',
+                values: { date: { ranges: [A1] } },
+                refMap: { date: { pattern: DATE_PATTERN } },
+            }),
+            removeNumberFormat: () => commands.syncExecuteCommand(RemoveNumfmtMutation.id, {
+                unitId,
+                subUnitId: 'grid',
+                ranges: [A1],
+            }),
+        };
+    }
+
+    it('shows the date in a closed cell editor once a date format is set on the selected cell', () => {
+        const { numfmtService, unitId, editedBody, setDateFormat } = createNumfmtController();
+        expect(editedBody()).toBe(`${SERIAL}\r\n`);
+
+        setDateFormat();
+
+        expect(numfmtService.getValue(unitId, 'grid', 0, 0)?.pattern).toBe(DATE_PATTERN);
+        // Opening the editor on the same cell reuses this snapshot, so it must already hold the date text.
+        expect(editedBody()).toBe(`${SERIAL_AS_DATE}\r\n`);
+    });
+
+    it('shows the serial again in a closed cell editor once the number format of the selected cell is removed', () => {
+        const { numfmtService, unitId, editedBody, setDateFormat, removeNumberFormat } = createNumfmtController();
+        setDateFormat();
+        expect(editedBody()).toBe(`${SERIAL_AS_DATE}\r\n`);
+
+        removeNumberFormat();
+
+        expect(numfmtService.getValue(unitId, 'grid', 0, 0)).toBeNull();
+        expect(editedBody()).toBe(`${SERIAL}\r\n`);
+    });
+
+    it('keeps the open draft clean when a date format is set on the edited cell', () => {
+        const { bridge, unitId, editedBody, editedDocumentModel, setDateFormat } = createNumfmtController();
+        bridge.changeVisible({ visible: true, eventType: DeviceInputEventType.Keyboard, unitId });
+        const draftDocumentModel = editedDocumentModel();
+
+        setDateFormat();
+
+        expect(editedDocumentModel()).toBe(draftDocumentModel);
+        expect(editedBody()).toBe(`${SERIAL}\r\n`);
         expect(bridge.getEditorDirty()).toBe(false);
     });
 });

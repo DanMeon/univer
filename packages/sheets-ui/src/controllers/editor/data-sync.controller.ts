@@ -14,10 +14,17 @@
  * limitations under the License.
  */
 
-import type { DocumentDataModel, ICommandInfo, IDocumentBody, IDocumentStyle, IDrawings, IParagraph, Nullable } from '@univerjs/core';
+// Modified by Carenode, 2026 — CNT-5176: a number format set on or removed from the edit cell rebuilds its closed editor snapshot
+
+import type { DocumentDataModel, ICommandInfo, IDocumentBody, IDocumentStyle, IDrawings, IParagraph, IRange, Nullable } from '@univerjs/core';
 import type { IRichTextEditingMutationParams } from '@univerjs/docs';
 import type { DocumentViewModel } from '@univerjs/engine-render';
-import type { IMoveRangeMutationParams, ISetRangeValuesMutationParams } from '@univerjs/sheets';
+import type {
+    IMoveRangeMutationParams,
+    IRemoveNumfmtMutationParams,
+    ISetNumfmtMutationParams,
+    ISetRangeValuesMutationParams,
+} from '@univerjs/sheets';
 import {
     BooleanNumber,
     createParagraphId,
@@ -31,6 +38,7 @@ import {
     IContextService,
     Inject,
     IUniverInstanceService,
+    Rectangle,
     ThemeService,
     Tools,
     UniverInstanceType,
@@ -40,7 +48,14 @@ import {
 import { DocSkeletonManagerService, RichTextEditingMutation } from '@univerjs/docs';
 import { ReplaceSnapshotCommand } from '@univerjs/docs-ui';
 import { IRenderManagerService } from '@univerjs/engine-render';
-import { MoveRangeMutation, RangeProtectionRuleModel, SetRangeValuesMutation, WorksheetProtectionRuleModel } from '@univerjs/sheets';
+import {
+    MoveRangeMutation,
+    RangeProtectionRuleModel,
+    RemoveNumfmtMutation,
+    SetNumfmtMutation,
+    SetRangeValuesMutation,
+    WorksheetProtectionRuleModel,
+} from '@univerjs/sheets';
 import { skip } from 'rxjs';
 import type { ICellEditorState } from '../../services/editor-bridge.service';
 import { IEditorBridgeService } from '../../services/editor-bridge.service';
@@ -177,8 +192,17 @@ export class EditorDataSyncController extends Disposable {
             })
         );
 
-        // Update formula bar content when you call SetRangeValuesMutation and MoveRangeMutation.
-        const needUpdateFormulaEditorContentCommandList = [SetRangeValuesMutation.id, MoveRangeMutation.id];
+        /**
+         * Update formula bar content when you call SetRangeValuesMutation and MoveRangeMutation, and when a
+         * number format is set or removed: the editor text of a cell depends on its number format (a date
+         * serial is edited as a date), and the number format mutations write the cell style directly.
+         */
+        const needUpdateFormulaEditorContentCommandList = [
+            SetRangeValuesMutation.id,
+            MoveRangeMutation.id,
+            SetNumfmtMutation.id,
+            RemoveNumfmtMutation.id,
+        ];
         this.disposeWithMe(
             this._commandService.onCommandExecuted((command: ICommandInfo) => {
                 if (!needUpdateFormulaEditorContentCommandList.includes(command.id)) {
@@ -230,12 +254,25 @@ export class EditorDataSyncController extends Disposable {
                     && this._hasMatrixCell(params.to.value, row, column));
         }
 
+        if (command.id === SetNumfmtMutation.id && command.params) {
+            const params = command.params as ISetNumfmtMutationParams;
+            return this._isEditedUnit(editCell, params.unitId, params.subUnitId)
+                && Object.values(params.values).some(({ ranges }) => this._hasRangeCell(ranges, row, column));
+        }
+
+        if (command.id === RemoveNumfmtMutation.id && command.params) {
+            const params = command.params as IRemoveNumfmtMutationParams;
+            return this._isEditedUnit(editCell, params.unitId, params.subUnitId)
+                && this._hasRangeCell(params.ranges, row, column);
+        }
+
         return false;
     }
 
     /**
      * Whether a matched mutation replaces the edited cell's content. Moving cells into or out of the edited
      * cell does; a style-only write does not, because the editor does not own the cell style it renders with.
+     * Setting or removing a number format is such a style-only write: the mutations only change `s.n`.
      */
     private _writesCellContent(command: ICommandInfo, editCell: ICellEditorState): boolean {
         // MoveRange only reaches this point when it writes or clears the edited cell's coordinates.
@@ -273,6 +310,11 @@ export class EditorDataSyncController extends Disposable {
     ): boolean {
         const rowData = matrix?.[row];
         return rowData != null && Object.prototype.hasOwnProperty.call(rowData, column);
+    }
+
+    private _hasRangeCell(ranges: IRange[], row: number, column: number): boolean {
+        const cell = { startRow: row, endRow: row, startColumn: column, endColumn: column };
+        return ranges.some((range) => Rectangle.contains(range, cell));
     }
 
     // Sync actions between cell editor and formula editor, and make `dataStream` and `paragraph` is the same.
