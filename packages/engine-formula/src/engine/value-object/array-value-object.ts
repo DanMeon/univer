@@ -165,8 +165,6 @@ export class ArrayValueObject extends BaseValueObject {
 
     private _useInvertedIndexCache: boolean = false;
 
-    private _legacyImplicitForAggregate: boolean = false;
-
     private _sliceCache = new Map<string, ArrayValueObject>();
 
     private _flattenCache: Nullable<ArrayValueObject>;
@@ -259,14 +257,6 @@ export class ArrayValueObject extends BaseValueObject {
 
     usesInvertedIndexCache() {
         return this._useInvertedIndexCache && this._calculationCache != null && !this._calculationCache.closed;
-    }
-
-    usesLegacyImplicitForAggregate() {
-        return this._legacyImplicitForAggregate;
-    }
-
-    setLegacyImplicitForAggregate(value: boolean) {
-        this._legacyImplicitForAggregate = value;
     }
 
     override getArrayValue() {
@@ -1903,12 +1893,7 @@ export class ArrayValueObject extends BaseValueObject {
             result.push(rowList);
         }
 
-        const newArray = this._createNewArray(result, rowCount, columnCount);
-        if (batchOperatorType === BatchOperatorType.PLUS) {
-            newArray.setLegacyImplicitForAggregate(true);
-        }
-
-        return newArray;
+        return this._createNewArray(result, rowCount, columnCount);
     }
 
     private _checkArrayCalculateType(valueObject: ArrayValueObject) {
@@ -1943,8 +1928,6 @@ export class ArrayValueObject extends BaseValueObject {
             this._currentColumn = rawValue.column;
 
             this._useInvertedIndexCache = rawValue.useInvertedIndexCache === true;
-
-            this._legacyImplicitForAggregate = rawValue.legacyImplicitForAggregate === true;
 
             return rawValue.calculateValueList;
         }

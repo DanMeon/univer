@@ -15,10 +15,11 @@
  */
 
 import type { Injector, IWorkbookData } from '@univerjs/core';
-import type { LexerNode } from '../../../../engine/analysis/lexer-node';
-import type { BaseAstNode } from '../../../../engine/ast-node/base-ast-node';
 import { CellValueType, LocaleType } from '@univerjs/core';
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { LexerNode } from '../../../../engine/analysis/lexer-node';
+import type { BaseAstNode } from '../../../../engine/ast-node/base-ast-node';
+import { createFunctionTestBed } from '../../../__tests__/create-function-test-bed';
 import { ErrorType } from '../../../../basics/error-type';
 import { Lexer } from '../../../../engine/analysis/lexer';
 import { AstTreeBuilder } from '../../../../engine/analysis/parser';
@@ -29,7 +30,6 @@ import { BooleanValueObject, NullValueObject, NumberValueObject, StringValueObje
 import { IFormulaCurrentConfigService } from '../../../../services/current-data.service';
 import { IFunctionService } from '../../../../services/function.service';
 import { IFormulaRuntimeService } from '../../../../services/runtime.service';
-import { createFunctionTestBed } from '../../../__tests__/create-function-test-bed';
 import { Divided } from '../../../meta/divided';
 import { FUNCTION_NAMES_META } from '../../../meta/function-names';
 import { Plus } from '../../../meta/plus';
@@ -305,11 +305,11 @@ describe('Test sumproduct function', () => {
             expect(getObjectValue(result, true)).toBe(1209.32171126296);
         });
 
-        it('uses the formula row for legacy implicit intersection of derived arrays passed to SUM', () => {
+        it('sums the whole derived array passed to SUM on a row the ranges cross', () => {
             get(IFormulaRuntimeService).setCurrent(1, 0, 3, 3, 'sheet1', 'test');
             const result = calculate('=SUMPRODUCT(C1:C3,A1:A3+B1:B3)/SUM(A1:A3+B1:B3)');
 
-            expect(result).toBeCloseTo((0.1 * 110 + 0.2 * 220 + 0.3 * 330) / 220, 12);
+            expect(result).toBeCloseTo((0.1 * 110 + 0.2 * 220 + 0.3 * 330) / (110 + 220 + 330), 12);
         });
     });
 });

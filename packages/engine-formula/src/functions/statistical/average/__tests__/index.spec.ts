@@ -14,14 +14,69 @@
  * limitations under the License.
  */
 
-import { describe, expect, it } from 'vitest';
+import type { IWorkbookData } from '@univerjs/core';
+import { CellValueType, LocaleType } from '@univerjs/core';
+import { beforeEach, describe, expect, it } from 'vitest';
+import type { LexerNode } from '../../../../engine/analysis/lexer-node';
+import type { BaseAstNode } from '../../../../engine/ast-node/base-ast-node';
+import { createFunctionTestBed } from '../../../__tests__/create-function-test-bed';
 import { ErrorType } from '../../../../basics/error-type';
+import { Lexer } from '../../../../engine/analysis/lexer';
+import { AstTreeBuilder } from '../../../../engine/analysis/parser';
+import { Interpreter } from '../../../../engine/interpreter/interpreter';
+import { generateExecuteAstNodeData } from '../../../../engine/utils/ast-node-tool';
 import { ArrayValueObject, transformToValueObject } from '../../../../engine/value-object/array-value-object';
 import { ErrorValueObject } from '../../../../engine/value-object/base-value-object';
 import { BooleanValueObject, NullValueObject, NumberValueObject, StringValueObject } from '../../../../engine/value-object/primitive-object';
+import { IFormulaCurrentConfigService } from '../../../../services/current-data.service';
+import { IFunctionService } from '../../../../services/function.service';
+import { IFormulaRuntimeService } from '../../../../services/runtime.service';
+import { FUNCTION_NAMES_META } from '../../../meta/function-names';
+import { Minus } from '../../../meta/minus';
+import { Multiply } from '../../../meta/multiply';
+import { Plus } from '../../../meta/plus';
 import { getObjectValue } from '../../../util';
 import { FUNCTION_NAMES_STATISTICAL } from '../../function-names';
 import { Average } from '../index';
+
+// H1:H3 = {1;2;3}, I1:I3 = {4;5;6}, H5:J5 = {1,2,3}, H6:J6 = {4,5,6}
+const getOperatorDerivedArrayWorkbookData = (): IWorkbookData => ({
+    id: 'test',
+    appVersion: '3.0.0-alpha',
+    sheets: {
+        sheet1: {
+            id: 'sheet1',
+            cellData: {
+                0: {
+                    7: { v: 1, t: CellValueType.NUMBER },
+                    8: { v: 4, t: CellValueType.NUMBER },
+                },
+                1: {
+                    7: { v: 2, t: CellValueType.NUMBER },
+                    8: { v: 5, t: CellValueType.NUMBER },
+                },
+                2: {
+                    7: { v: 3, t: CellValueType.NUMBER },
+                    8: { v: 6, t: CellValueType.NUMBER },
+                },
+                4: {
+                    7: { v: 1, t: CellValueType.NUMBER },
+                    8: { v: 2, t: CellValueType.NUMBER },
+                    9: { v: 3, t: CellValueType.NUMBER },
+                },
+                5: {
+                    7: { v: 4, t: CellValueType.NUMBER },
+                    8: { v: 5, t: CellValueType.NUMBER },
+                    9: { v: 6, t: CellValueType.NUMBER },
+                },
+            },
+        },
+    },
+    locale: LocaleType.ZH_CN,
+    name: '',
+    sheetOrder: [],
+    styles: {},
+});
 
 describe('Test average function', () => {
     const testFunction = new Average(FUNCTION_NAMES_STATISTICAL.AVERAGE);
@@ -209,22 +264,74 @@ describe('Test average function', () => {
             const result = averageFunction.calculate(var1);
             expect(getObjectValue(result)).toBe(5);
         });
+    });
 
-        it('Legacy implicit aggregate array still uses implicit intersection', () => {
-            const averageFunction = new Average(FUNCTION_NAMES_STATISTICAL.AVERAGE);
-            averageFunction.setRefInfo('', '', 1, 7);
-            const var1 = ArrayValueObject.create({
-                calculateValueList: transformToValueObject([[3], [7]]),
-                rowCount: 2,
-                columnCount: 1,
-                unitId: '',
-                sheetId: '',
-                row: 0,
-                column: 0,
+    describe('Average of an operator-derived array', () => {
+        let calculateAt: (formula: string, row: number, column: number) => ReturnType<typeof getObjectValue>;
+
+        beforeEach(() => {
+            const testBed = createFunctionTestBed(getOperatorDerivedArrayWorkbookData());
+            const get = testBed.get;
+
+            const lexer = get(Lexer);
+            const astTreeBuilder = get(AstTreeBuilder);
+            const interpreter = get(Interpreter);
+            const formulaCurrentConfigService = get(IFormulaCurrentConfigService);
+            const formulaRuntimeService = get(IFormulaRuntimeService);
+
+            formulaCurrentConfigService.load({
+                formulaData: {},
+                arrayFormulaCellData: {},
+                arrayFormulaRange: {},
+                forceCalculate: false,
+                dirtyRanges: [],
+                dirtyNameMap: {},
+                dirtyDefinedNameMap: {},
+                dirtyUnitFeatureMap: {},
+                dirtyUnitOtherFormulaMap: {},
+                excludedCell: {},
+                allUnitData: {
+                    [testBed.unitId]: testBed.sheetData,
+                },
             });
-            var1.setLegacyImplicitForAggregate(true);
-            const result = averageFunction.calculate(var1);
-            expect(getObjectValue(result)).toBe(7);
+
+            get(IFunctionService).registerExecutors(
+                new Average(FUNCTION_NAMES_STATISTICAL.AVERAGE),
+                new Plus(FUNCTION_NAMES_META.PLUS),
+                new Minus(FUNCTION_NAMES_META.MINUS),
+                new Multiply(FUNCTION_NAMES_META.MULTIPLY)
+            );
+
+            const sheetItem = testBed.sheetData[testBed.sheetId];
+
+            calculateAt = (formula: string, row: number, column: number) => {
+                formulaRuntimeService.setCurrent(row, column, sheetItem.rowCount, sheetItem.columnCount, testBed.sheetId, testBed.unitId);
+
+                const lexerNode = lexer.treeBuilder(formula);
+                const astNode = astTreeBuilder.parse(lexerNode as LexerNode);
+                const result = interpreter.execute(generateExecuteAstNodeData(astNode as BaseAstNode));
+
+                return getObjectValue(result);
+            };
+        });
+
+        it('averages the whole range + range array on every row the ranges cross', () => {
+            expect(calculateAt('=AVERAGE(H1:H3+I1:I3)', 0, 10)).toBe(7);
+            expect(calculateAt('=AVERAGE(H1:H3+I1:I3)', 1, 10)).toBe(7);
+            expect(calculateAt('=AVERAGE(H1:H3+I1:I3)', 2, 10)).toBe(7);
+        });
+
+        it('averages the whole range + range array on a row the ranges do not cross', () => {
+            expect(calculateAt('=AVERAGE(H1:H3+I1:I3)', 7, 10)).toBe(7);
+        });
+
+        it('averages the whole horizontal range + range array on a column the ranges cross', () => {
+            expect(calculateAt('=AVERAGE(H5:J5+H6:J6)', 9, 8)).toBe(7);
+        });
+
+        it('averages the whole range - range and range * range arrays on a row the ranges cross', () => {
+            expect(calculateAt('=AVERAGE(H1:H3-I1:I3)', 0, 10)).toBe(-3);
+            expect(calculateAt('=AVERAGE(H1:H3*I1:I3)', 0, 10)).toBeCloseTo(32 / 3, 12);
         });
     });
 });

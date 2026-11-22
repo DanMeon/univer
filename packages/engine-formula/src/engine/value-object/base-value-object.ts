@@ -32,7 +32,6 @@ export interface IArrayValueObject {
     sheetId: string;
     row: number;
     column: number;
-    legacyImplicitForAggregate?: boolean;
     useInvertedIndexCache?: boolean;
 }
 export class BaseValueObject extends ObjectClassType {
