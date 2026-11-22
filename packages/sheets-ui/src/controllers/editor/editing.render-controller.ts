@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Modified by Carenode, 2026 — CNT-5176: only an open editor follows its cell on row and column inserts, removals and moves
+// Modified by Carenode, 2026 — CNT-5176: only an open editor follows its cell, and only on row and column inserts, removals and moves of its own sheet
 
 import type {
     DocumentDataModel,
@@ -36,6 +36,7 @@ import type { IInnerPasteCommandParams } from '@univerjs/docs-ui';
 import type {
     ISetRangeValuesCommandParams,
     ISetWorksheetActivateCommandParams,
+    ISheetCommandSharedParams,
     MutationsAffectRange,
 } from '@univerjs/sheets';
 import {
@@ -342,6 +343,10 @@ export class EditingRenderController extends Disposable {
                     if (!this._editorBridgeService.isVisible().visible) break;
                     const editLocation = this._editorBridgeService.getEditLocation();
                     if (!editLocation) break;
+                    // Rows and columns of another sheet or workbook (a collaborator's change, for one) do not move
+                    // the edited cell; following them would submit the draft into another cell of this sheet.
+                    const { unitId, subUnitId } = (commandInfo as IMutationInfo<ISheetCommandSharedParams>).params;
+                    if (unitId !== editLocation.unitId || subUnitId !== editLocation.sheetId) break;
                     const currentRange = {
                         startRow: editLocation.row,
                         startColumn: editLocation.column,

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Modified by Carenode, 2026 — CNT-5176: cases for the edit cell snapshot after a number format is set or removed, and after rows or columns are inserted, removed, moved or reordered
+// Modified by Carenode, 2026 — CNT-5176: cases for the edit cell snapshot after a number format is set or removed, and after rows or columns are inserted, removed, moved or reordered on its own or another sheet or workbook
 
 import type { ICommandInfo, IDocumentBody, IDocumentData, IDrawings, IRange, Nullable } from '@univerjs/core';
 import type { IRemoveNumfmtMutationParams, ISetNumfmtMutationParams } from '@univerjs/sheets';
@@ -31,6 +31,7 @@ import {
     Injector,
     IUniverInstanceService,
     ThemeService,
+    UniverInstanceType,
 } from '@univerjs/core';
 import { DocStateChangeManagerService } from '@univerjs/docs';
 import { IFunctionService, LexerTreeBuilder } from '@univerjs/engine-formula';
@@ -1091,6 +1092,18 @@ describe('EditorDataSyncController row and column change refresh with real sheet
     ];
     const SELECTED = { row: 13, column: 2 };
     const C14_TO_C16 = { startRow: 13, endRow: 15, startColumn: 2, endColumn: 2 };
+    /** Another workbook of the bed. Its sheet has the id of the edited sheet, so only the workbook differs. */
+    const OTHER_WORKBOOK = 'other-book';
+
+    /** Mutations that move C14 when they change its own sheet, and where C14 goes. */
+    const MOVES_SELECTED_CELL_CASES = [
+        { change: 'inserts a row above row 14', command: insertRows(rows(13)), followed: { row: 14, column: 2 } },
+        { change: 'removes row 13', command: removeRows(rows(12)), followed: { row: 12, column: 2 } },
+        { change: 'moves row 15 above row 14', command: moveRows(rows(14), rows(13)), followed: { row: 14, column: 2 } },
+        { change: 'inserts a column before column C', command: insertColumns(columns(2)), followed: { row: 13, column: 3 } },
+        { change: 'removes column B', command: removeColumns(columns(1)), followed: { row: 13, column: 1 } },
+        { change: 'moves column D before column C', command: moveColumns(columns(3), columns(2)), followed: { row: 13, column: 3 } },
+    ];
 
     function createStructureController() {
         const { injector, workbook, render, manager, commands } = createChartRenderTestBed();
@@ -1123,6 +1136,11 @@ describe('EditorDataSyncController row and column change refresh with real sheet
         // Opening the editor scrolls to the edit cell; the scroll render controller is not part of this bed.
         commands.registerCommand({ id: ScrollToRangeOperation.id, type: CommandType.OPERATION, handler: () => true });
         workbook.addWorksheet('other', 2, { id: 'other', name: 'other', rowCount: 50, columnCount: 20 });
+        injector.get(IUniverInstanceService).createUnit(UniverInstanceType.UNIVER_SHEET, {
+            id: OTHER_WORKBOOK,
+            sheetOrder: ['grid'],
+            sheets: { grid: { id: 'grid', rowCount: 50, columnCount: 20 } },
+        }, { makeCurrent: false, skipAutoRender: true });
         manager.setCurrent({ sheetId: 'grid' });
         BLOCK.forEach((values, rowOffset) => values.forEach((value, columnOffset) => {
             worksheet.getCellMatrix().setValue(12 + rowOffset, 1 + columnOffset, { v: value });
@@ -1155,8 +1173,8 @@ describe('EditorDataSyncController row and column change refresh with real sheet
                 const location = bridge.getEditLocation();
                 return location && { row: location.row, column: location.column };
             },
-            run: (command: StructureCommand, subUnitId = 'grid') => {
-                const { id, params } = command({ unitId, subUnitId });
+            run: (command: StructureCommand, subUnitId = 'grid', targetUnitId = unitId) => {
+                const { id, params } = command({ unitId: targetUnitId, subUnitId });
                 expect(commands.syncExecuteCommand(id, params)).toBe(true);
             },
         };
@@ -1227,5 +1245,45 @@ describe('EditorDataSyncController row and column change refresh with real sheet
         expect(editedBody()).toBe('c14\r\n');
         expect(bridge.getEditorDirty()).toBe(false);
         expect(editLocation()).toEqual(SELECTED);
+    });
+
+    it.each(MOVES_SELECTED_CELL_CASES)('keeps an open editor on C14 when a mutation $change of another sheet', ({ command }) => {
+        const { bridge, unitId, editedDocumentModel, editedBody, editLocation, run } = createStructureController();
+        bridge.changeVisible({ visible: true, eventType: DeviceInputEventType.Keyboard, unitId });
+        const draftDocumentModel = editedDocumentModel();
+
+        run(command, 'other');
+
+        // The open editor submits its draft to this location when editing ends.
+        expect(editLocation()).toEqual(SELECTED);
+        expect(editedDocumentModel()).toBe(draftDocumentModel);
+        expect(editedBody()).toBe('c14\r\n');
+        expect(bridge.getEditorDirty()).toBe(false);
+    });
+
+    it.each(MOVES_SELECTED_CELL_CASES)('keeps an open editor on C14 when a mutation $change of the same sheet in another workbook', ({ command }) => {
+        const { bridge, unitId, editedDocumentModel, editedBody, editLocation, run } = createStructureController();
+        bridge.changeVisible({ visible: true, eventType: DeviceInputEventType.Keyboard, unitId });
+        const draftDocumentModel = editedDocumentModel();
+
+        run(command, 'grid', OTHER_WORKBOOK);
+
+        expect(editLocation()).toEqual(SELECTED);
+        expect(editedDocumentModel()).toBe(draftDocumentModel);
+        expect(editedBody()).toBe('c14\r\n');
+        expect(bridge.getEditorDirty()).toBe(false);
+    });
+
+    it.each(MOVES_SELECTED_CELL_CASES)('moves an open editor along with C14 when a mutation $change of its own sheet', ({ command, followed }) => {
+        const { bridge, unitId, editedDocumentModel, editedBody, editLocation, run } = createStructureController();
+        bridge.changeVisible({ visible: true, eventType: DeviceInputEventType.Keyboard, unitId });
+        const draftDocumentModel = editedDocumentModel();
+
+        run(command);
+
+        expect(editLocation()).toEqual(followed);
+        expect(editedDocumentModel()).toBe(draftDocumentModel);
+        expect(editedBody()).toBe('c14\r\n');
+        expect(bridge.getEditorDirty()).toBe(false);
     });
 });
