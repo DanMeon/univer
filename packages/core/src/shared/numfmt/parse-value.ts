@@ -17,6 +17,8 @@
 // Derived from numfmt 3.2.6 (MIT), commit c2cfdfa01bb1f24df51e985825671eb480daed4c.
 // See packages/core/src/shared/numfmt/LICENSE.
 
+// Modified by Carenode, 2026 — CNT-5176: a month name that starts with a digit (ko `12월`, ja/zh `12月`) followed by two digits is not read as month + two-digit year
+
 import type { LocaleData, ParseData } from './types';
 import { DateSystem } from '../../types/enum/date-system';
 import { currencySymbols, reCurrencySymbols } from './constants';
@@ -629,6 +631,13 @@ const getDateLocaleLookups = (locale: LocaleData): DateLocaleLookups => {
     return cached.lookups;
 };
 
+// Carenode CNT-5176: when the matched month name starts with a digit (ko `12월`, ja/zh `12月`, mn `12-р сар`),
+// `<month name> <two digits>` reads as month + day to the person typing it (`12월 25`), so the `M-y`/`F-y`
+// reading (December 2025) is a wrong guess. parseDate returns null for that shape (also with a day name or
+// time around it) so the input stays text, as it did before locale-aware parsing. Other shapes are unchanged.
+const isDigitLedMonthNameWithShortYear = (matchedMonth: string, path: string): boolean =>
+    isDigit(matchedMonth[0]) && /^[FM]y$/.test(path.replace(/[^jdnmMFyY]/g, ''));
+
 /** Parse a date or datetime string and return its serial value and format. */
 export function parseDate(value: string, options: ParseOptions = {}): ParseData<number> | null {
     const l10n = getLocale(options.locale || '') || defaultLocale;
@@ -650,6 +659,9 @@ export function parseDate(value: string, options: ParseOptions = {}): ParseData<
         return null;
     }
     if (date.month == null || date._mon == null) {
+        return null;
+    }
+    if (isDigitLedMonthNameWithShortYear(date._mon, date.path)) {
         return null;
     }
 

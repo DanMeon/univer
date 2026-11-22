@@ -19,6 +19,8 @@
 
 // @vitest-environment node
 
+// Modified by Carenode, 2026 — CNT-5176: the `mmmm/yy` round trip stays text when the month name starts with a digit
+
 import { describe, expect, it } from 'vitest';
 import { format } from '../api';
 import { addLocale, getLocale, listLocales } from '../locale';
@@ -724,6 +726,12 @@ numfmtTest('parseDate locale support', (t) => {
         for (const f of fm) {
             const o = format(f, 3290.1278435, opt);
             const parsed = parseDate(o, opt);
+            // Carenode CNT-5176: `<month name starting with a digit>/<two digits>` (zh_TW `1月/09`) is not
+            // read as month + two-digit year, so this one shape stays text in those locales.
+            if (f === 'mmmm/yy' && /^\d/.test(getLocale(l)!.mmmm[0])) {
+                t.deepEqual(parsed, null, `Locale: "${f}" in ${l} (${o}) stays text`);
+                continue;
+            }
             t.ok(!!parsed, `Locale: "${f}" in ${l} (${o})`);
         }
         // locales with preferMDY should allow dates that fit, else only allow DMY
