@@ -39,8 +39,9 @@ Pushing a `v*-carenode.*` tag runs, on the runner and toolchain of upstream's `r
 3. for `N >= 1`, previous release — `compare-previous.mts` downloads `<base>-carenode.<N-1>` from npm and compares
    the build with it file by file: besides the version, chunk names and the README notice, built code may differ
    only in the modules (and declaration files) of source files changed since tag `v<base>-carenode.<N-1>`; derived
-   files (import and export blocks, the UMD bundle, the Tailwind CSS) may differ only in such a package. Anything
-   else fails the run. The previous release must be public;
+   files (import and export blocks, the UMD bundle, the Tailwind CSS) may differ only in such a package, and the
+   declaration of an unchanged file only where its inferred type names another import and one of the two comes from
+   a changed file. Anything else fails the run. The previous release must be public;
 4. for `N >= 1`, once steps 1 to 3 pass, stage the tarballs on npm through trusted publishing (`publish.sh stage`).
    Nothing is public until a maintainer approves the staged versions with 2FA. `N = 0` only leaves the tarballs as
    the run's `univer-<version>` artifact.

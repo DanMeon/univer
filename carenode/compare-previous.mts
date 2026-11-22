@@ -11,7 +11,8 @@
 //     (`name$1`) are ignored, because a new name in a changed module can renumber them elsewhere. A declaration file
 //     lib/types/<path>.d.ts may differ only when src/<path>.ts(x) changed. Derived files - the import block before the
 //     first module, the export block after the last, a bundle without module markers (UMD), and the Tailwind CSS -
-//     may differ only in such a package, and are listed.
+//     may differ only in such a package, and are listed. So is the declaration of an unchanged source file that only
+//     names another of its imports where one of the two comes from a changed file (changedImportBehind).
 // Anything else fails, and so does a package without a changed source file whose built code differs. A changed file
 // whose build shows no difference is listed (a comment-only change shows nothing, since the bundles drop comments).
 //
@@ -177,7 +178,12 @@ for (const pkg of selection.packages) {
                 touched.add(source);
                 result.attributed.push({ file, kind: a === undefined ? 'added' : b === undefined ? 'removed' : 'declaration', detail: source });
             } else {
-                result.disallowed.push({ file, kind: 'declaration', detail: `${stem}.ts(x) did not change since ${previousTag}` });
+                const behind = a === undefined || b === undefined ? undefined : changedImportBehind(file, a, b, changed);
+                if (behind) {
+                    result.derived.push({ file, kind: 'derived', detail: `declaration names another import (${behind} changed)` });
+                } else {
+                    result.disallowed.push({ file, kind: 'declaration', detail: `${stem}.ts(x) did not change since ${previousTag}` });
+                }
             }
             return;
         }
@@ -297,6 +303,50 @@ function splitBundle(text: string): IBundle | undefined {
 /** Drop the `$<n>` suffix the bundler adds to an identifier that clashes with another module's. */
 function withoutRenumbering(text: string): string {
     return text.replace(/([A-Z_a-z][\w$]*?)\$\d+\b/g, '$1');
+}
+
+/** A declaration file without its `import { ... } from '...'` lines, and the module each imported name comes from. */
+function splitDeclarationImports(text: string): { body: string; modules: Map<string, string> } {
+    const modules = new Map<string, string>();
+    const body = text.replace(/^import (?:type )?\{([^}]*)\} from '([^']+)';\n/gm, (_line, list: string, specifier: string) => {
+        for (const item of list.split(',')) {
+            const name = item.trim().split(/\s+as\s+/).pop()!.replace(/^type\s+/, '');
+            if (name) modules.set(name, specifier);
+        }
+        return '';
+    });
+    return { body, modules };
+}
+
+/**
+ * The changed source files behind a difference in the declaration `file` of a source file that did not change, or
+ * `undefined` when the difference is of another kind. The declared type of an export without an annotation is
+ * inferred, and it names what the module imports: a list of classes is declared with the one class type the others
+ * reduce to. When a class in the list changes its members, TypeScript may name another class of the list there. So
+ * the two declarations must be equal but for their import lines and the imported names, and wherever they name
+ * different imports, one of the two must come from a changed source file of the package.
+ */
+function changedImportBehind(file: string, a: string, b: string, changed: Set<string>): string | undefined {
+    const previous = splitDeclarationImports(a);
+    const built = splitDeclarationImports(b);
+    const words = /[A-Z_a-z$][\w$]*|[^A-Z_a-z$]+/g;
+    const wordsA = previous.body.match(words) ?? [];
+    const wordsB = built.body.match(words) ?? [];
+    if (wordsA.length !== wordsB.length) return undefined;
+    const dir = path.posix.dirname(`src/${file.slice('lib/types/'.length)}`);
+    const changedSourceOf = (specifier: string | undefined): string | undefined => {
+        if (!specifier?.startsWith('.')) return undefined;
+        const target = path.posix.join(dir, specifier);
+        return [`${target}.ts`, `${target}.tsx`, `${target}/index.ts`, `${target}/index.tsx`].find((candidate) => changed.has(candidate));
+    };
+    const behind = new Set<string>();
+    for (let i = 0; i < wordsA.length; i++) {
+        if (wordsA[i] === wordsB[i]) continue;
+        const source = changedSourceOf(previous.modules.get(wordsA[i])) ?? changedSourceOf(built.modules.get(wordsB[i]));
+        if (!previous.modules.has(wordsA[i]) || !built.modules.has(wordsB[i]) || !source) return undefined;
+        behind.add(source);
+    }
+    return behind.size > 0 ? [...behind].join(', ') : undefined;
 }
 
 /** README after the fork notice, or `undefined` when the notice is missing. */
