@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the resource load case keeps held points and adds missing ones as init false
+
 import type { IDisposable, Workbook, Worksheet } from '@univerjs/core';
 import {
     DesktopLogService,
@@ -22,6 +24,7 @@ import {
     IPermissionService,
     IResourceManagerService,
     IUniverInstanceService,
+    PermissionStatus,
     UniverInstanceType,
 } from '@univerjs/core';
 import { UnitObject } from '@univerjs/protocol';
@@ -34,6 +37,7 @@ import {
     RangeProtectionRuleModel,
     ViewStateEnum,
 } from '../../../../models/range-protection-rule.model';
+import { getAllWorksheetPermissionPoint, getAllWorksheetPermissionPointByPointPanel } from '../utils';
 import { WorksheetProtectionPointModel } from '../worksheet-permission-point.model';
 import { WorksheetProtectionRuleModel } from '../worksheet-permission-rule.model';
 import { WorksheetPermissionService } from '../worksheet-permission.service';
@@ -234,23 +238,38 @@ describe('WorksheetPermissionService', () => {
         expect(permissionService.deletedPermissionIds.some((id) => id.includes('book-1') && id.includes('sheet-1'))).toBe(true);
     });
 
-    it('updates existing worksheet permission points when rule resources load', () => {
+    it('keeps the worksheet permission points a view holds and adds missing ones as init false when resources load', () => {
         const ruleResource = resourceManagerService.resources[0];
+        const pointResource = resourceManagerService.resources[1];
+        const heldPoints = [...permissionService.permissionPoints.values()] as Array<{ id: string; value?: unknown; status?: PermissionStatus }>;
+        heldPoints.forEach((point) => {
+            point.value = true;
+            point.status = PermissionStatus.DONE;
+        });
         const existingAddCount = permissionService.addedPermissionIds.length;
-
-        ruleResource.onLoad('book-1', {
-            'sheet-1': [{
-                permissionId: 'worksheet-perm-1',
-                unitType: UnitObject.Worksheet,
-                unitId: 'book-1',
-                subUnitId: 'sheet-1',
-                viewState: ViewStateEnum.OthersCanView,
-                editState: EditStateEnum.OnlyMe,
-            }],
+        const createWorksheetRule = (subUnitId: string) => ({
+            permissionId: `worksheet-perm-${subUnitId}`,
+            unitType: UnitObject.Worksheet,
+            unitId: 'book-1',
+            subUnitId,
+            viewState: ViewStateEnum.OthersCanView,
+            editState: EditStateEnum.OnlyMe,
         });
 
-        expect(permissionService.addedPermissionIds.length).toBe(existingAddCount);
-        expect(permissionService.updatedPermissionPoints.length).toBeGreaterThan(0);
-        expect(permissionService.updatedPermissionPoints.every((item) => item.id.includes('book-1') && item.id.includes('sheet-1') && item.value === false)).toBe(true);
+        ruleResource.onLoad('book-1', { 'sheet-1': [createWorksheetRule('sheet-1')], 'sheet-2': [createWorksheetRule('sheet-2')] });
+        pointResource.onLoad('book-1', { 'sheet-1': [{ unitId: 'book-1', subUnitId: 'sheet-1', permissionId: 'worksheet-point-1' }] });
+
+        expect(heldPoints.length).toBe(getAllWorksheetPermissionPoint().length + getAllWorksheetPermissionPointByPointPanel().length);
+        expect(heldPoints.every((point) => point.id.includes('book-1') && point.id.includes('sheet-1'))).toBe(true);
+        expect(permissionService.updatedPermissionPoints).toEqual([]);
+        expect(heldPoints.every((point) => permissionService.getPermissionPoint(point.id) === point && point.value === true && point.status === PermissionStatus.DONE)).toBe(true);
+
+        const addedIds = permissionService.addedPermissionIds.slice(existingAddCount);
+        expect(addedIds.length).toBe(getAllWorksheetPermissionPoint().length);
+        expect(addedIds.every((id) => id.includes('book-1') && id.includes('sheet-2'))).toBe(true);
+        expect(addedIds.every((id) => {
+            const point = permissionService.getPermissionPoint(id) as { value?: unknown; status?: PermissionStatus } | undefined;
+            return point?.value === false && point.status === PermissionStatus.INIT;
+        })).toBe(true);
     });
 });

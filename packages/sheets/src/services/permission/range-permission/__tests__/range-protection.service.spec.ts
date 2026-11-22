@@ -14,15 +14,18 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the snapshot load case keeps held points and adds missing ones as init false
+
 import type { IDisposable, IPermissionPoint, IRange, Workbook } from '@univerjs/core';
-import type { IRangeProtectionRule } from '../../../../models/range-protection-rule.model';
-import { Injector, IPermissionService, IResourceManagerService, IUniverInstanceService } from '@univerjs/core';
+import { Injector, IPermissionService, IResourceManagerService, IUniverInstanceService, PermissionStatus } from '@univerjs/core';
 import { UnitObject } from '@univerjs/protocol';
 import { of, Subject } from 'rxjs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { IRangeProtectionRule } from '../../../../models/range-protection-rule.model';
 import { EditStateEnum, RangeProtectionRuleModel, ViewStateEnum } from '../../../../models/range-protection-rule.model';
 import { RangeProtectionCache } from '../../../../models/range-protection.cache';
 import { RangeProtectionService } from '../range-protection.service';
+import { getAllRangePermissionPoint } from '../util';
 
 class TestPermissionService {
     readonly permissionPointUpdate$ = new Subject<unknown>();
@@ -191,15 +194,26 @@ describe('RangeProtectionService', () => {
         expect(cache.deleteUnit).toHaveBeenCalledWith('book-2');
     });
 
-    it('updates existing range permission points when snapshot resources load', () => {
-        const rule = createRule('rule-1', 'perm-existing');
-        ruleModel.addRule('book-1', 'sheet-1', rule);
+    it('keeps the range permission points a view holds and adds missing ones as init false when snapshot resources load', () => {
+        const heldRule = createRule('rule-1', 'perm-existing');
+        const newRule = createRule('rule-2', 'perm-new');
+        ruleModel.addRule('book-1', 'sheet-1', heldRule);
+        const heldPoints = [...permissionService.permissionPoints.values()].filter((point) => point.id.includes('perm-existing'));
+        heldPoints.forEach((point) => {
+            point.value = true;
+            point.status = PermissionStatus.DONE;
+        });
         const existingAddCount = permissionService.addedPermissionIds.length;
 
-        resourceManagerService.registeredResource.onLoad('book-1', { 'sheet-1': [rule] });
+        resourceManagerService.registeredResource.onLoad('book-1', { 'sheet-1': [heldRule, newRule] });
 
-        expect(permissionService.addedPermissionIds.length).toBe(existingAddCount);
-        expect(permissionService.updatedPermissionPoints.length).toBeGreaterThan(0);
-        expect(permissionService.updatedPermissionPoints.every((item) => item.id.includes('perm-existing') && item.value === false)).toBe(true);
+        expect(heldPoints.length).toBe(getAllRangePermissionPoint().length);
+        expect(permissionService.updatedPermissionPoints).toEqual([]);
+        expect(heldPoints.every((point) => permissionService.getPermissionPoint(point.id) === point && point.value === true && point.status === PermissionStatus.DONE)).toBe(true);
+
+        const addedIds = permissionService.addedPermissionIds.slice(existingAddCount);
+        expect(addedIds.length).toBe(getAllRangePermissionPoint().length);
+        expect(addedIds.every((id) => id.includes('perm-new'))).toBe(true);
+        expect(addedIds.every((id) => permissionService.getPermissionPoint(id)?.value === false && permissionService.getPermissionPoint(id)?.status === PermissionStatus.INIT)).toBe(true);
     });
 });

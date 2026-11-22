@@ -14,14 +14,14 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — a resource load keeps the range protection points the view holds, as in 0.24
+
 import type { IPermissionPoint } from '@univerjs/core';
 import type { UnitAction } from '@univerjs/protocol';
-
-import type { IObjectModel } from '../../../models/range-protection-rule.model';
 import { Disposable, Inject, IPermissionService, IResourceManagerService, IUniverInstanceService, UniverInstanceType } from '@univerjs/core';
 import { UnitObject } from '@univerjs/protocol';
+import type { IObjectModel } from '../../../models/range-protection-rule.model';
 import { RangeProtectionRuleModel } from '../../../models/range-protection-rule.model';
-
 import { RangeProtectionCache } from '../../../models/range-protection.cache';
 import { baseProtectionActions, getAllRangePermissionPoint } from './util';
 
@@ -136,8 +136,12 @@ export class RangeProtectionService extends Disposable {
     }
 
     private _addOrUpdatePermissionPoint(instance: IPermissionPoint) {
+        // Carenode: a resource load keeps a protection point this view already holds, as in 0.24. The collab binding
+        // loads the protection resources again after every row or column edit to put the rules back on their cells;
+        // upstream's overwrite (#7089) flipped the points, which cleared the undo history on the editor's re-ask and
+        // left View and Edit `false` on a surface that answers only `init` points. The name stays upstream's to keep
+        // the rebase diff small; nothing is updated here any more.
         if (this._permissionService.getPermissionPoint(instance.id)) {
-            this._permissionService.updatePermissionPoint(instance.id, instance.value);
             return;
         }
 

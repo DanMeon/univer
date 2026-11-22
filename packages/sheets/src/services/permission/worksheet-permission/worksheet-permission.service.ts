@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — a resource load keeps the worksheet protection points the view holds, as in 0.24
+
 import type { IPermissionPoint, Workbook, Worksheet } from '@univerjs/core';
-import type { IObjectModel, IObjectPointModel } from '../type';
 import {
     ILogService,
     Inject,
@@ -27,6 +28,7 @@ import {
     UniverInstanceType,
 } from '@univerjs/core';
 import { takeUntil } from 'rxjs/operators';
+import type { IObjectModel, IObjectPointModel } from '../type';
 import { RangeProtectionRuleModel } from '../../../models/range-protection-rule.model';
 import { getAllRangePermissionPoint } from '../range-permission/util';
 import { getAllWorkbookPermissionPoint } from '../workbook-permission';
@@ -225,8 +227,12 @@ export class WorksheetPermissionService extends RxDisposable {
     }
 
     private _addOrUpdatePermissionPoint(instance: IPermissionPoint) {
+        // Carenode: a resource load keeps a protection point this view already holds, as in 0.24. The collab binding
+        // loads the protection resources again after every row or column edit to put the rules back on their cells;
+        // upstream's overwrite (#7089) flipped the points, which cleared the undo history on the editor's re-ask and
+        // left View and Edit `false` on a surface that answers only `init` points. The name stays upstream's to keep
+        // the rebase diff small; nothing is updated here any more. Both onLoad callers (rules, point panel) use it.
         if (this._permissionService.getPermissionPoint(instance.id)) {
-            this._permissionService.updatePermissionPoint(instance.id, instance.value);
             return;
         }
 
