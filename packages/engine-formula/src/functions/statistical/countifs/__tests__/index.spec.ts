@@ -15,10 +15,11 @@
  */
 
 import type { Injector, IWorkbookData } from '@univerjs/core';
-import type { LexerNode } from '../../../../engine/analysis/lexer-node';
-import type { BaseAstNode } from '../../../../engine/ast-node/base-ast-node';
 import { CellValueType, LocaleType } from '@univerjs/core';
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { LexerNode } from '../../../../engine/analysis/lexer-node';
+import type { BaseAstNode } from '../../../../engine/ast-node/base-ast-node';
+import { createFunctionTestBed } from '../../../__tests__/create-function-test-bed';
 import { ErrorType } from '../../../../basics/error-type';
 import { Lexer } from '../../../../engine/analysis/lexer';
 import { AstTreeBuilder } from '../../../../engine/analysis/parser';
@@ -27,18 +28,45 @@ import { generateExecuteAstNodeData } from '../../../../engine/utils/ast-node-to
 import { IFormulaCurrentConfigService } from '../../../../services/current-data.service';
 import { IFunctionService } from '../../../../services/function.service';
 import { IFormulaRuntimeService } from '../../../../services/runtime.service';
-import { createFunctionTestBed } from '../../../__tests__/create-function-test-bed';
 import { FUNCTION_NAMES_LOGICAL } from '../../../logical/function-names';
 import { If } from '../../../logical/if';
 import { FUNCTION_NAMES_MATH } from '../../../math/function-names';
+import { Sum } from '../../../math/sum';
+import { Sumifs } from '../../../math/sumifs';
 import { Sumproduct } from '../../../math/sumproduct';
 import { Compare } from '../../../meta/compare';
 import { FUNCTION_NAMES_META } from '../../../meta/function-names';
 import { Minus } from '../../../meta/minus';
 import { Multiply } from '../../../meta/multiply';
+import { Concatenate } from '../../../text/concatenate';
+import { FUNCTION_NAMES_TEXT } from '../../../text/function-names';
 import { getObjectValue } from '../../../util';
+import { Countif } from '../../countif';
 import { FUNCTION_NAMES_STATISTICAL } from '../../function-names';
 import { Countifs } from '../index';
+
+// A1:A6 = a b a c b a, B1:B6 = 1..6, D1:D3 = a b c
+const getDerivedCriteriaWorkbookData = (): IWorkbookData => ({
+    id: 'test',
+    appVersion: '3.0.0-alpha',
+    sheets: {
+        sheet1: {
+            id: 'sheet1',
+            cellData: {
+                0: { 0: { v: 'a', t: CellValueType.STRING }, 1: { v: 1, t: CellValueType.NUMBER }, 3: { v: 'a', t: CellValueType.STRING } },
+                1: { 0: { v: 'b', t: CellValueType.STRING }, 1: { v: 2, t: CellValueType.NUMBER }, 3: { v: 'b', t: CellValueType.STRING } },
+                2: { 0: { v: 'a', t: CellValueType.STRING }, 1: { v: 3, t: CellValueType.NUMBER }, 3: { v: 'c', t: CellValueType.STRING } },
+                3: { 0: { v: 'c', t: CellValueType.STRING }, 1: { v: 4, t: CellValueType.NUMBER } },
+                4: { 0: { v: 'b', t: CellValueType.STRING }, 1: { v: 5, t: CellValueType.NUMBER } },
+                5: { 0: { v: 'a', t: CellValueType.STRING }, 1: { v: 6, t: CellValueType.NUMBER } },
+            },
+        },
+    },
+    locale: LocaleType.ZH_CN,
+    name: '',
+    sheetOrder: [],
+    styles: {},
+});
 
 const getTestWorkbookData = (): IWorkbookData => {
     return {
@@ -392,6 +420,78 @@ describe('Test countifs function', () => {
         it('Excludes blank cells in less-than text criteria', async () => {
             const result = await calculate('=COUNTIFS(B5:B8,"<1 hour")');
             expect(result).toBe(2);
+        });
+    });
+});
+
+describe('Test countifs function with a derived criteria array', () => {
+    let calculateAt: (formula: string, row: number, column: number) => ReturnType<typeof getObjectValue>;
+
+    beforeEach(() => {
+        const testBed = createFunctionTestBed(getDerivedCriteriaWorkbookData());
+        const get = testBed.get;
+
+        const lexer = get(Lexer);
+        const astTreeBuilder = get(AstTreeBuilder);
+        const interpreter = get(Interpreter);
+        const formulaCurrentConfigService = get(IFormulaCurrentConfigService);
+        const formulaRuntimeService = get(IFormulaRuntimeService);
+
+        formulaCurrentConfigService.load({
+            formulaData: {},
+            arrayFormulaCellData: {},
+            arrayFormulaRange: {},
+            forceCalculate: false,
+            dirtyRanges: [],
+            dirtyNameMap: {},
+            dirtyDefinedNameMap: {},
+            dirtyUnitFeatureMap: {},
+            dirtyUnitOtherFormulaMap: {},
+            excludedCell: {},
+            allUnitData: {
+                [testBed.unitId]: testBed.sheetData,
+            },
+        });
+
+        get(IFunctionService).registerExecutors(
+            new Countifs(FUNCTION_NAMES_STATISTICAL.COUNTIFS),
+            new Countif(FUNCTION_NAMES_STATISTICAL.COUNTIF),
+            new Sumifs(FUNCTION_NAMES_MATH.SUMIFS),
+            new Sum(FUNCTION_NAMES_MATH.SUM),
+            new Sumproduct(FUNCTION_NAMES_MATH.SUMPRODUCT),
+            new Concatenate(FUNCTION_NAMES_TEXT.CONCATENATE)
+        );
+
+        const sheetItem = testBed.sheetData[testBed.sheetId];
+
+        calculateAt = (formula: string, row: number, column: number) => {
+            formulaRuntimeService.setCurrent(row, column, sheetItem.rowCount, sheetItem.columnCount, testBed.sheetId, testBed.unitId);
+
+            const lexerNode = lexer.treeBuilder(formula);
+            const astNode = astTreeBuilder.parse(lexerNode as LexerNode);
+            const result = interpreter.execute(generateExecuteAstNodeData(astNode as BaseAstNode));
+
+            return getObjectValue(result);
+        };
+    });
+
+    describe.each([
+        ['a row the criteria range crosses', 1],
+        ['a row the criteria range does not cross', 8],
+    ])('formula on %s', (_rowLabel, row) => {
+        it('counts every criterion of a criteria array built with &', () => {
+            expect(calculateAt('=COUNTIFS(A1:A6,D1:D3&"")', row, 10)).toStrictEqual([[3], [2], [1]]);
+            expect(calculateAt('=SUM(COUNTIFS(A1:A6,D1:D3&""))', row, 10)).toBe(6);
+            expect(calculateAt('=SUMPRODUCT(COUNTIFS(A1:A6,D1:D3&""))', row, 10)).toBe(6);
+        });
+
+        it('counts every criterion of a criteria range', () => {
+            expect(calculateAt('=COUNTIFS(A1:A6,D1:D3)', row, 10)).toStrictEqual([[3], [2], [1]]);
+        });
+
+        it('matches COUNTIF and SUMIFS over the same criteria array', () => {
+            expect(calculateAt('=SUMPRODUCT(COUNTIF(A1:A6,D1:D3&""))', row, 10)).toBe(6);
+            expect(calculateAt('=SUMPRODUCT(SUMIFS(B1:B6,A1:A6,D1:D3&""))', row, 10)).toBe(21);
         });
     });
 });

@@ -30,7 +30,6 @@ export class If extends BaseFunction {
 
     override calculate(logicalTest: BaseValueObject, valueIfTrue: BaseValueObject, valueIfFalse: BaseValueObject = BooleanValueObject.create(false)) {
         let _logicalTest = logicalTest;
-        let useLegacyImplicitSelectedValue = false;
 
         if (logicalTest.isArray()) {
             const logicalTestArray = logicalTest as ArrayValueObject;
@@ -39,20 +38,11 @@ export class If extends BaseFunction {
 
             if (rowCount === 1 && columnCount === 1) {
                 _logicalTest = logicalTestArray.get(0, 0) as BaseValueObject;
-            } else if (
-                !this._isCurrentArrayFormula() &&
-                logicalTestArray.getUnitId() !== '' &&
-                logicalTestArray.getSheetId() !== '' &&
-                logicalTestArray.getCurrentRow() >= 0 &&
-                logicalTestArray.getCurrentColumn() >= 0
-            ) {
-                _logicalTest = this._legacyImplicitArrayValue(logicalTestArray);
-                useLegacyImplicitSelectedValue = true;
             }
         }
 
         if (!_logicalTest.isArray()) {
-            return this._handleSingleObject(_logicalTest, valueIfTrue, valueIfFalse, useLegacyImplicitSelectedValue);
+            return this._handleSingleObject(_logicalTest, valueIfTrue, valueIfFalse);
         }
 
         // get max row length
@@ -77,11 +67,11 @@ export class If extends BaseFunction {
             const valueIfTrueValue = valueIfTrueArray.get(rowIndex, columnIndex) as BaseValueObject;
             const valueIfFalseValue = valueIfFalseArray.get(rowIndex, columnIndex) as BaseValueObject;
 
-            return this._handleSingleObject(logicalTestValue, valueIfTrueValue, valueIfFalseValue, false);
+            return this._handleSingleObject(logicalTestValue, valueIfTrueValue, valueIfFalseValue);
         });
     }
 
-    private _handleSingleObject(logicalTest: BaseValueObject, valueIfTrue: BaseValueObject, valueIfFalse: BaseValueObject, useLegacyImplicitSelectedValue: boolean) {
+    private _handleSingleObject(logicalTest: BaseValueObject, valueIfTrue: BaseValueObject, valueIfFalse: BaseValueObject) {
         if (logicalTest.isError()) {
             return logicalTest;
         }
@@ -91,12 +81,9 @@ export class If extends BaseFunction {
             return logicalTestValue;
         }
 
-        let selectedValue = logicalTestValue.getValue()
+        const selectedValue = logicalTestValue.getValue()
             ? valueIfTrue
             : valueIfFalse;
-        if (useLegacyImplicitSelectedValue) {
-            selectedValue = this._legacyImplicitSelectedValue(selectedValue);
-        }
         return this._coerceSelectedValue(selectedValue);
     }
 
@@ -128,61 +115,5 @@ export class If extends BaseFunction {
         }
 
         return ErrorValueObject.create(ErrorType.VALUE);
-    }
-
-    private _legacyImplicitSelectedValue(value: BaseValueObject): BaseValueObject {
-        if (!value.isArray()) {
-            return value;
-        }
-
-        const array = value as ArrayValueObject;
-
-        if (
-            array.getUnitId() === '' ||
-            array.getSheetId() === '' ||
-            array.getCurrentRow() < 0 ||
-            array.getCurrentColumn() < 0
-        ) {
-            return value;
-        }
-
-        return this._legacyImplicitArrayValue(array);
-    }
-
-    private _legacyImplicitArrayValue(logicalTest: ArrayValueObject): BaseValueObject {
-        const startRow = logicalTest.getCurrentRow();
-        const startColumn = logicalTest.getCurrentColumn();
-        const rowCount = logicalTest.getRowCount();
-        const columnCount = logicalTest.getColumnCount();
-
-        if (startRow < 0 || startColumn < 0) {
-            return ErrorValueObject.create(ErrorType.VALUE);
-        }
-
-        let rowIndex = -1;
-        let columnIndex = -1;
-        if (rowCount === 1 && columnCount === 1) {
-            rowIndex = 0;
-            columnIndex = 0;
-        } else if (rowCount === 1) {
-            rowIndex = 0;
-            columnIndex = this.column - startColumn;
-        } else if (columnCount === 1) {
-            rowIndex = this.row - startRow;
-            columnIndex = 0;
-        } else {
-            rowIndex = this.row - startRow;
-            columnIndex = this.column - startColumn;
-        }
-
-        if (rowIndex < 0 || rowIndex >= rowCount || columnIndex < 0 || columnIndex >= columnCount) {
-            return ErrorValueObject.create(ErrorType.VALUE);
-        }
-
-        return logicalTest.get(rowIndex, columnIndex) as BaseValueObject || ErrorValueObject.create(ErrorType.VALUE);
-    }
-
-    private _isCurrentArrayFormula(): boolean {
-        return this.currentFormulaRowCount > 1 || this.currentFormulaColumnCount > 1;
     }
 }

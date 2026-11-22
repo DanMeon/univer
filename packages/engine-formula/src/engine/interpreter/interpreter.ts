@@ -15,15 +15,14 @@
  */
 
 import type { DateSystem, Nullable } from '@univerjs/core';
+import { Disposable } from '@univerjs/core';
 import type { BaseAstNode } from '../ast-node/base-ast-node';
 import type { LambdaNode } from '../ast-node/lambda-node';
 import type { ReferenceNode } from '../ast-node/reference-node';
 import type { BaseReferenceObject, FunctionVariantType } from '../reference-object/base-reference-object';
 import type { IExecuteAstNodeData } from '../utils/ast-node-tool';
 import type { PreCalculateNodeType } from '../utils/node-type';
-import type { ArrayValueObject } from '../value-object/array-value-object';
 import type { BaseValueObject } from '../value-object/base-value-object';
-import { Disposable } from '@univerjs/core';
 import { AstNodePromiseType } from '../../basics/common';
 import { ErrorType } from '../../basics/error-type';
 import { DEFAULT_TOKEN_LAMBDA_FUNCTION_NAME } from '../../basics/token-type';
@@ -35,7 +34,7 @@ import { BooleanValueObject, NumberValueObject } from '../value-object/primitive
 
 type InterpreterRuntimeService = Pick<
     IFormulaRuntimeService,
-    'currentColumn' | 'currentRow' | 'currentUnitId' | 'isStopExecution'
+    'currentUnitId' | 'isStopExecution'
 >;
 
 export class Interpreter extends Disposable {
@@ -398,17 +397,14 @@ export class Interpreter extends Disposable {
             return ErrorValueObject.create(ErrorType.VALUE);
         }
 
-        const preserveArray = this._preserveLazyIfSelectedReferenceArray(node);
         if (value.isReferenceObject()) {
             const reference = value as BaseReferenceObject;
-            if (preserveArray) {
+            const { startRow, startColumn, endRow, endColumn } = reference.getRangePosition();
+            if (this._preserveLazyIfSelectedReferenceArray(node) || startRow !== endRow || startColumn !== endColumn) {
                 return reference.toArrayValueObject();
             }
-            value = this._implicitLazyIfReferenceValue(reference);
-        }
 
-        if (value.isArray() && !preserveArray) {
-            value = this._implicitLazyIfArrayValue(value as ArrayValueObject);
+            value = reference.getCellByPosition();
         }
 
         if (!value.isArray()) {
@@ -417,27 +413,6 @@ export class Interpreter extends Disposable {
         }
 
         return value;
-    }
-
-    private _implicitLazyIfReferenceValue(reference: BaseReferenceObject): BaseValueObject {
-        const range = reference.getRangePosition();
-        const currentRow = this._runtimeService.currentRow || 0;
-        const currentColumn = this._runtimeService.currentColumn || 0;
-        const { startRow, startColumn, endRow, endColumn } = range;
-
-        if (startRow === endRow && startColumn === endColumn) {
-            return reference.getCellByPosition();
-        }
-
-        if (endRow === startRow && currentColumn >= startColumn && currentColumn <= endColumn) {
-            return reference.getCellByColumn(currentColumn);
-        }
-
-        if (startColumn === endColumn && currentRow >= startRow && currentRow <= endRow) {
-            return reference.getCellByRow(currentRow);
-        }
-
-        return ErrorValueObject.create(ErrorType.VALUE);
     }
 
     private _preserveLazyIfSelectedReferenceArray(node: BaseAstNode): boolean {
@@ -454,45 +429,5 @@ export class Interpreter extends Disposable {
         }
 
         return false;
-    }
-
-    private _implicitLazyIfArrayValue(array: ArrayValueObject): FunctionVariantType {
-        if (
-            array.getUnitId() === '' ||
-            array.getSheetId() === '' ||
-            array.getCurrentRow() < 0 ||
-            array.getCurrentColumn() < 0
-        ) {
-            return array;
-        }
-
-        const startRow = array.getCurrentRow();
-        const startColumn = array.getCurrentColumn();
-        const rowCount = array.getRowCount();
-        const columnCount = array.getColumnCount();
-        const currentRow = this._runtimeService.currentRow || 0;
-        const currentColumn = this._runtimeService.currentColumn || 0;
-
-        let rowIndex = -1;
-        let columnIndex = -1;
-        if (rowCount === 1 && columnCount === 1) {
-            rowIndex = 0;
-            columnIndex = 0;
-        } else if (rowCount === 1) {
-            rowIndex = 0;
-            columnIndex = currentColumn - startColumn;
-        } else if (columnCount === 1) {
-            rowIndex = currentRow - startRow;
-            columnIndex = 0;
-        } else {
-            rowIndex = currentRow - startRow;
-            columnIndex = currentColumn - startColumn;
-        }
-
-        if (rowIndex < 0 || rowIndex >= rowCount || columnIndex < 0 || columnIndex >= columnCount) {
-            return ErrorValueObject.create(ErrorType.VALUE);
-        }
-
-        return (array.get(rowIndex, columnIndex) as BaseValueObject) || ErrorValueObject.create(ErrorType.VALUE);
     }
 }

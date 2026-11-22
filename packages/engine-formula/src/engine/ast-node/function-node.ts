@@ -400,9 +400,9 @@ export class FunctionNode extends BaseAstNode {
     }
 
     private _setRefInfo() {
-        const { currentUnitId, currentSubUnitId, currentRow, currentColumn, currentRowCount, currentColumnCount } = this._runtimeService;
+        const { currentUnitId, currentSubUnitId, currentRow, currentColumn } = this._runtimeService;
 
-        this._functionExecutor.setRefInfo(currentUnitId, currentSubUnitId, currentRow, currentColumn, currentRowCount, currentColumnCount);
+        this._functionExecutor.setRefInfo(currentUnitId, currentSubUnitId, currentRow, currentColumn);
         this._functionExecutor.setDateSystem(this._currentConfigService.getDateSystem(currentUnitId));
 
         if (this._functionExecutor.needsSheetsInfo) {

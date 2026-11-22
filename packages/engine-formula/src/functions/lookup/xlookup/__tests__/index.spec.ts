@@ -14,16 +14,59 @@
  * limitations under the License.
  */
 
-import { describe, expect, it } from 'vitest';
+import type { IWorkbookData } from '@univerjs/core';
+import { CellValueType, LocaleType } from '@univerjs/core';
+import { beforeEach, describe, expect, it } from 'vitest';
+import type { LexerNode } from '../../../../engine/analysis/lexer-node';
+import type { BaseAstNode } from '../../../../engine/ast-node/base-ast-node';
+import { createFunctionTestBed } from '../../../__tests__/create-function-test-bed';
 import { ErrorType } from '../../../../basics/error-type';
+import { Lexer } from '../../../../engine/analysis/lexer';
+import { AstTreeBuilder } from '../../../../engine/analysis/parser';
+import { Interpreter } from '../../../../engine/interpreter/interpreter';
+import { generateExecuteAstNodeData } from '../../../../engine/utils/ast-node-tool';
 import { ArrayValueObject } from '../../../../engine/value-object/array-value-object';
 import { BaseValueObject, ErrorValueObject } from '../../../../engine/value-object/base-value-object';
 import { NullValueObject, NumberValueObject, StringValueObject } from '../../../../engine/value-object/primitive-object';
+import { IFormulaCurrentConfigService } from '../../../../services/current-data.service';
+import { IFunctionService } from '../../../../services/function.service';
+import { IFormulaRuntimeService } from '../../../../services/runtime.service';
+import { FUNCTION_NAMES_MATH } from '../../../math/function-names';
+import { Sum } from '../../../math/sum';
 import { Concatenate } from '../../../text/concatenate';
 import { FUNCTION_NAMES_TEXT } from '../../../text/function-names';
 import { getObjectValue } from '../../../util';
 import { FUNCTION_NAMES_LOOKUP } from '../../function-names';
 import { Xlookup } from '../index';
+
+// Sheet1: H1:H3 = 1 2 3, I1:I3 = 4 5 6. Small is a sheet of one cell,
+// so a formula on it is evaluated with a formula range of one cell.
+const getOneCellSheetWorkbookData = (): IWorkbookData => ({
+    id: 'test',
+    appVersion: '3.0.0-alpha',
+    sheets: {
+        sheet1: {
+            id: 'sheet1',
+            name: 'Sheet1',
+            cellData: {
+                0: { 7: { v: 1, t: CellValueType.NUMBER }, 8: { v: 4, t: CellValueType.NUMBER } },
+                1: { 7: { v: 2, t: CellValueType.NUMBER }, 8: { v: 5, t: CellValueType.NUMBER } },
+                2: { 7: { v: 3, t: CellValueType.NUMBER }, 8: { v: 6, t: CellValueType.NUMBER } },
+            },
+        },
+        small: {
+            id: 'small',
+            name: 'Small',
+            rowCount: 1,
+            columnCount: 1,
+            cellData: {},
+        },
+    },
+    locale: LocaleType.ZH_CN,
+    name: '',
+    sheetOrder: ['sheet1', 'small'],
+    styles: {},
+});
 
 const arrayValueObject1 = ArrayValueObject.create(/*ts*/ `{
     1, "First", 100, 89;
@@ -421,7 +464,7 @@ describe('Test xlookup', () => {
             ]);
         });
 
-        it('Reference-derived lookup array should use legacy implicit intersection', async () => {
+        it('Reference-derived lookup array should stay an array on a row it crosses', async () => {
             const positionedFunction = new Xlookup(FUNCTION_NAMES_LOOKUP.XLOOKUP);
             positionedFunction.setRefInfo('unit', 'summary', 2, 5);
 
@@ -451,14 +494,18 @@ describe('Test xlookup', () => {
                 throw new TypeError('Expected XLOOKUP to return a value object');
             }
 
-            expect(getObjectValue(resultObject)).toBe(20);
+            expect(getObjectValue(resultObject)).toStrictEqual([
+                [10],
+                [20],
+                [30],
+            ]);
         });
 
         it.each([
-            ['{1,2,3}', 8, 2, 20],
-            ['{1,2;3,4}', 2, 2, 40],
-            ['{1,2;3,4}', 3, 3, ErrorType.VALUE],
-        ] as const)('uses legacy implicit intersection for a positioned lookup %s at (%i, %i)', (lookup, row, column, expected) => {
+            ['{1,2,3}', 8, 2, [[10, 20, 30]]],
+            ['{1,2;3,4}', 2, 2, [[10, 20], [30, 40]]],
+            ['{1,2;3,4}', 3, 3, [[10, 20], [30, 40]]],
+        ])('looks up every value of a positioned lookup %s at (%i, %i)', (lookup, row, column, expected) => {
             const positionedFunction = new Xlookup(FUNCTION_NAMES_LOOKUP.XLOOKUP);
             positionedFunction.setRefInfo('unit', 'summary', row, column);
             const lookupValue = ArrayValueObject.create(lookup);
@@ -472,12 +519,12 @@ describe('Test xlookup', () => {
                 ArrayValueObject.create('{10;20;30;40}'),
                 StringValueObject.create('missing')
             );
-            expect(result.getValue()).toBe(expected);
+            expect(getObjectValue(result)).toStrictEqual(expected);
         });
 
-        it('Reference-derived lookup array should stay an array in a dynamic array formula', async () => {
+        it('Reference-derived lookup array should stay an array on a row it does not cross', async () => {
             const positionedFunction = new Xlookup(FUNCTION_NAMES_LOOKUP.XLOOKUP);
-            positionedFunction.setRefInfo('unit', 'summary', 2, 5, 3, 1);
+            positionedFunction.setRefInfo('unit', 'summary', 8, 5);
 
             const lookupValue = ArrayValueObject.createByArray([
                 ['A'],
@@ -538,7 +585,7 @@ describe('Test xlookup', () => {
             expect(getObjectValue(resultObject)).toBe(20);
         });
 
-        it('Reference-derived concatenated lookup array should use legacy implicit intersection', async () => {
+        it('Reference-derived concatenated lookup array should stay an array', async () => {
             const positionedFunction = new Xlookup(FUNCTION_NAMES_LOOKUP.XLOOKUP);
             positionedFunction.setRefInfo('unit', 'scorecard', 1, 3);
 
@@ -580,7 +627,11 @@ describe('Test xlookup', () => {
                 ])
             ) as BaseValueObject;
 
-            expect(getObjectValue(resultObject)).toBe(0.45);
+            expect(getObjectValue(resultObject)).toStrictEqual([
+                [0.45],
+                [1.2],
+                [0.5],
+            ]);
         });
 
         it('Search across multiple columns', async () => {
@@ -1061,6 +1112,58 @@ describe('Test xlookup', () => {
 
             const result2 = testFunction.calculate(lookupValue, lookupArray, returnArray, nullObject, nullObject, searchMode);
             expect(getObjectValue(result2)).toBe(ErrorType.NAME);
+        });
+    });
+
+    describe('Xlookup in a formula on a sheet of one cell', () => {
+        let calculateOnSmallSheet: (formula: string) => ReturnType<typeof getObjectValue>;
+
+        beforeEach(() => {
+            const testBed = createFunctionTestBed(getOneCellSheetWorkbookData());
+            const get = testBed.get;
+
+            const lexer = get(Lexer);
+            const astTreeBuilder = get(AstTreeBuilder);
+            const interpreter = get(Interpreter);
+            const formulaCurrentConfigService = get(IFormulaCurrentConfigService);
+            const formulaRuntimeService = get(IFormulaRuntimeService);
+
+            formulaCurrentConfigService.load({
+                formulaData: {},
+                arrayFormulaCellData: {},
+                arrayFormulaRange: {},
+                forceCalculate: false,
+                dirtyRanges: [],
+                dirtyNameMap: {},
+                dirtyDefinedNameMap: {},
+                dirtyUnitFeatureMap: {},
+                dirtyUnitOtherFormulaMap: {},
+                excludedCell: {},
+                allUnitData: {
+                    [testBed.unitId]: testBed.sheetData,
+                },
+            });
+
+            get(IFunctionService).registerExecutors(
+                new Xlookup(FUNCTION_NAMES_LOOKUP.XLOOKUP),
+                new Sum(FUNCTION_NAMES_MATH.SUM)
+            );
+
+            calculateOnSmallSheet = (formula: string) => {
+                const sheetItem = testBed.sheetData.small;
+                formulaRuntimeService.setCurrent(0, 0, sheetItem.rowCount, sheetItem.columnCount, 'small', testBed.unitId);
+
+                const lexerNode = lexer.treeBuilder(formula);
+                const astNode = astTreeBuilder.parse(lexerNode as LexerNode);
+                const result = interpreter.execute(generateExecuteAstNodeData(astNode as BaseAstNode));
+
+                return getObjectValue(result);
+            };
+        });
+
+        it('looks up every value of a lookup range', () => {
+            expect(calculateOnSmallSheet('=SUM(XLOOKUP(Sheet1!H1:H3,Sheet1!H1:H3,Sheet1!I1:I3))')).toBe(15);
+            expect(calculateOnSmallSheet('=SUM(XLOOKUP(Sheet1!H2:H3,Sheet1!H1:H3,Sheet1!I1:I3))')).toBe(11);
         });
     });
 });
