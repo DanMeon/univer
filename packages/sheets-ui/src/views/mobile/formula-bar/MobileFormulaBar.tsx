@@ -14,14 +14,21 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176: an edit opened by a hardware key keeps its typed draft in the formula bar
+
+import type { DocumentDataModel } from '@univerjs/core';
 import {
     DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
+    DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
     FOCUSING_FX_BAR_EDITOR,
     ICommandService,
     IContextService,
     IPermissionService,
+    IUniverInstanceService,
     LocaleService,
     SheetTypes,
+    Tools,
+    UniverInstanceType,
 } from '@univerjs/core';
 import { borderBottomClassName, clsx, useMobileKeyboardViewportLayout } from '@univerjs/design';
 import { IEditorService } from '@univerjs/docs-ui';
@@ -74,6 +81,7 @@ export function MobileFormulaBar() {
     const editorBridgeService = useDependency(IEditorBridgeService);
     const contextService = useDependency(IContextService);
     const editorService = useDependency(IEditorService);
+    const univerInstanceService = useDependency(IUniverInstanceService);
     const visible = useObservable(
         () => editorBridgeService.visible$.pipe(map((state) => state.visible)),
         false,
@@ -89,7 +97,7 @@ export function MobileFormulaBar() {
         contextService.setContextValue(FOCUSING_FX_BAR_EDITOR, true);
         let cursorFrame: number | undefined;
         const contentFrame = requestAnimationFrame(() => {
-            editorBridgeService.refreshEditCellState();
+            fillOpenedMobileFormulaBar(editorBridgeService, univerInstanceService, editorService);
             if (editorService.getFocusId() !== DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY) {
                 editorService.focus(DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY);
             } else {
@@ -108,13 +116,39 @@ export function MobileFormulaBar() {
                 cancelAnimationFrame(cursorFrame);
             }
         };
-    }, [contextService, editorBridgeService, editorService, isGridSheet, visible]);
+    }, [contextService, editorBridgeService, editorService, isGridSheet, univerInstanceService, visible]);
 
     if (!visible || !isGridSheet) {
         return null;
     }
 
     return <MobileFormulaBarEditor />;
+}
+
+/**
+ * Fills the formula bar that has just mounted for a new edit. It mounts after editing opens, so it missed what the
+ * cell editor received before that: an edit opened by a hardware key already holds the typed character there, and
+ * re-reading the cell would put the stored content back over that draft.
+ */
+export function fillOpenedMobileFormulaBar(
+    editorBridgeService: IEditorBridgeService,
+    univerInstanceService: IUniverInstanceService,
+    editorService: IEditorService
+): void {
+    if (editorBridgeService.isVisible().eventType !== DeviceInputEventType.Keyboard) {
+        editorBridgeService.refreshEditCellState();
+        return;
+    }
+
+    const cellEditorBody = univerInstanceService
+        .getUnit<DocumentDataModel>(DOCS_NORMAL_EDITOR_UNIT_ID_KEY, UniverInstanceType.UNIVER_DOC)
+        ?.getBody();
+    const formulaEditor = editorService.getEditor(DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY);
+    if (!cellEditorBody || !formulaEditor) {
+        throw new Error('[MobileFormulaBar]: the cell editor or the formula bar editor is missing while editing.');
+    }
+
+    formulaEditor.setDocumentData({ ...formulaEditor.getDocumentData(), body: Tools.deepClone(cellEditorBody) }, null);
 }
 
 function MobileFormulaBarEditor() {

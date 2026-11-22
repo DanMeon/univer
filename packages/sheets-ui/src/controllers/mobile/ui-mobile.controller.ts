@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176: Tab and Shift+Tab submit the formula bar and edit the next cell sideways
+
 import type { DocumentDataModel, ICommand, Workbook } from '@univerjs/core';
 import {
     CommandType,
@@ -48,6 +50,7 @@ import {
     IShortcutService,
     IUIPartsService,
     KeyCode,
+    MetaKeys,
 } from '@univerjs/ui';
 import { DeleteRangeMoveLeftConfirmCommand } from '../../commands/commands/delete-range-move-left-confirm.command';
 import { DeleteRangeMoveUpConfirmCommand } from '../../commands/commands/delete-range-move-up-confirm.command';
@@ -139,10 +142,16 @@ export const MobileFormulaBarBreakLineCommand: ICommand = {
     },
 };
 
-export const MobileFormulaBarSubmitCommand: ICommand = {
+export interface IMobileFormulaBarSubmitCommandParams {
+    /** Where the next edited cell is. Enter (down) when omitted. */
+    direction?: Direction;
+    keycode?: KeyCode.ENTER | KeyCode.TAB;
+}
+
+export const MobileFormulaBarSubmitCommand: ICommand<IMobileFormulaBarSubmitCommandParams> = {
     id: MOBILE_FORMULA_BAR_SUBMIT_COMMAND_ID,
     type: CommandType.COMMAND,
-    async handler(accessor) {
+    async handler(accessor, params) {
         const instanceService = accessor.get(IUniverInstanceService);
         const workbook = instanceService.getCurrentUnitOfType<Workbook>(UniverInstanceType.UNIVER_SHEET);
         const formulaModel = instanceService.getUnit<DocumentDataModel>(
@@ -168,6 +177,7 @@ export const MobileFormulaBarSubmitCommand: ICommand = {
             const moved = await commandService.executeCommand(MoveSelectionEnterAndTabCommand.id, {
                 keycode: KeyCode.ENTER,
                 direction: Direction.DOWN,
+                ...params,
                 fromCurrentSelection: true,
             });
             if (!moved) return false;
@@ -412,6 +422,17 @@ export class SheetUIMobileController extends Disposable {
             },
             { id: DeleteLeftCommand.id, binding: KeyCode.BACKSPACE },
             { id: DeleteRightCommand.id, binding: KeyCode.DELETE },
+            // A hardware Tab keeps editing in the next cell like Enter does, instead of closing the editor.
+            {
+                id: MobileFormulaBarSubmitCommand.id,
+                binding: KeyCode.TAB,
+                staticParameters: { direction: Direction.RIGHT, keycode: KeyCode.TAB },
+            },
+            {
+                id: MobileFormulaBarSubmitCommand.id,
+                binding: KeyCode.TAB | MetaKeys.SHIFT,
+                staticParameters: { direction: Direction.LEFT, keycode: KeyCode.TAB },
+            },
         ];
 
         shortcuts.forEach((shortcut) => this.disposeWithMe(this._shortcutService.registerShortcut({

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176: registers the mobile hardware-keyboard controller
+
 import type { Dependency, Workbook } from '@univerjs/core';
 import type { IUniverUIConfig } from '@univerjs/ui';
 import {
@@ -56,6 +58,7 @@ import { MarkSelectionRenderController } from './controllers/mark-selection.cont
 import { SheetClipboardMobileUIController } from './controllers/mobile/clipboard-ui.controller';
 import { MobileComponentsController } from './controllers/mobile/components.controller';
 import { MobileEditorDataSyncController } from './controllers/mobile/editor-data-sync.controller';
+import { MobileSheetKeyboardController } from './controllers/mobile/mobile-keyboard.controller';
 import { SheetUIMobileController } from './controllers/mobile/ui-mobile.controller';
 import { MoveRangeRenderController } from './controllers/move-range.controller';
 import { SheetPermissionCheckUIController } from './controllers/permission/sheet-permission-check-ui.controller';
@@ -198,6 +201,7 @@ export class UniverSheetsMobileUIPlugin extends Plugin {
             [FormulaEditorController],
             [SheetsRenderService],
             [SheetUIMobileController],
+            [MobileSheetKeyboardController],
             [StatusBarController],
             [FormatPainterController],
             [SheetsDefinedNameController],
@@ -228,6 +232,7 @@ export class UniverSheetsMobileUIPlugin extends Plugin {
 
         touchDependencies(this._injector, [
             [SheetUIMobileController],
+            [MobileSheetKeyboardController],
             [SheetsRenderService],
             [SheetPermissionCheckUIController],
             [SheetPermissionInitUIController],
