@@ -15,6 +15,7 @@
  */
 
 // Modified by Carenode, 2026 — the mobile workbench takes its width, its height and the keyboard overlap from its mount container, not from the window
+// Modified by Carenode, 2026 — CNT-5176 mobile-keyboard-visible-height: the keyboard told by the visible height, the container followed when the page scrolls it, the visible bottom followed with no keyboard
 
 /**
  * @vitest-environment jsdom
@@ -36,9 +37,9 @@ import {
     ThemeService,
     UniverInstanceService,
 } from '@univerjs/core';
-import { ConfigContext } from '@univerjs/design';
+import { ConfigContext, useMobileKeyboardViewportLayout } from '@univerjs/design';
 import { connectInjector } from '@wendellhu/redi/react-bindings';
-import { useContext } from 'react';
+import { useContext, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { of, Subject } from 'rxjs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -47,7 +48,13 @@ import { ISidebarService } from '../../../services/sidebar/sidebar.service';
 import { ThemeSwitcherService } from '../../../services/theme-switcher/theme-switcher.service';
 import { IWorkbenchService, WorkbenchService } from '../../../services/workbench/workbench.service';
 import { MobileKeyboardInsetContext } from '../mobile-keyboard-inset-context';
-import { MobileWorkbench, resolveMobileKeyboardInset, resolveMobileWorkbenchBox } from '../MobileWorkbench';
+import {
+    isMobileKeyboardOpen,
+    isMobileWorkbenchBoxPastVisibleBottom,
+    MobileWorkbench,
+    resolveMobileKeyboardInset,
+    resolveMobileWorkbenchBox,
+} from '../MobileWorkbench';
 
 function KeyboardBar() {
     const bottom = useContext(MobileKeyboardInsetContext);
@@ -59,6 +66,13 @@ function KeyboardBar() {
             style={{ bottom }}
         />
     );
+}
+
+/** A bar laid out the way the input bar is: lifted from the bottom of its containing block to the visible bottom. */
+function ViewportBar() {
+    const ref = useRef<HTMLDivElement>(null);
+    const layout = useMobileKeyboardViewportLayout(ref);
+    return <div ref={ref} data-testid="viewport-bar" style={{ bottom: layout?.bottom ?? 0 }} />;
 }
 
 function createWorkbenchInjector(): Injector {
@@ -207,14 +221,29 @@ describe('MobileWorkbench in a host container', () => {
 
     function mount() {
         injector = createWorkbenchInjector();
-        injector.get(IUIPartsService).registerComponent(BuiltInUIPart.FOOTER, () => KeyboardBar);
+        const partsService = injector.get(IUIPartsService);
+        partsService.registerComponent(BuiltInUIPart.FOOTER, () => KeyboardBar);
+        partsService.registerComponent(BuiltInUIPart.FOOTER, () => ViewportBar);
         const ConnectedWorkbench = connectInjector(MobileWorkbench, injector) as ConnectedWorkbench;
         const mountContainer = document.createElement('div');
         vi.spyOn(mountContainer, 'getBoundingClientRect').mockImplementation(() => containerRect);
+        // ^ the viewport bar's containing block is the container, as the input bar's is the workbench in it
+        vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockImplementation(function (this: HTMLElement) {
+            return this.dataset.testid === 'viewport-bar' ? mountContainer : null;
+        });
         const view = render(<ConnectedWorkbench mountContainer={mountContainer} contextMenu={false} />);
         const root = view.container.querySelector<HTMLElement>('[data-u-comp="app-layout"]')!.parentElement!;
         const bar = view.container.querySelector<HTMLElement>('[data-testid="keyboard-bar"]')!;
-        return { mountContainer, root, bar, view };
+        const viewportBar = view.container.querySelector<HTMLElement>('[data-testid="viewport-bar"]')!;
+        return { mountContainer, root, bar, viewportBar, view };
+    }
+
+    function focusNewInput(): HTMLInputElement {
+        const input = document.createElement('input');
+        input.scrollIntoView = vi.fn();
+        document.body.appendChild(input);
+        act(() => input.focus());
+        return input;
     }
 
     beforeEach(() => {
@@ -272,7 +301,8 @@ describe('MobileWorkbench in a host container', () => {
         notifyContainerResize(mountContainer);
         expect(root.style.height).toBe('271px');
         expect(bar.style.bottom).toBe('0px');
-        expect(bar.dataset.viewport).toBe('null');
+        // ^ the keyboard is up, though it covers nothing of the container
+        expect(bar.dataset.viewport).toBe(JSON.stringify({ top: 0, bottom: 504, height: 504, stableHeight: 271 }));
         expect(root.style.getPropertyValue('--univer-mobile-keyboard-inset')).toBe('0px');
     });
 
@@ -300,25 +330,223 @@ describe('MobileWorkbench in a host container', () => {
         expect(bar.style.bottom).toBe('0px');
         expect(bar.dataset.viewport).toBe('null');
     });
+
+    it('moves nothing with no keyboard while the window holds the container or none of it can be seen', () => {
+        const { mountContainer, bar, viewportBar } = mount();
+        focusNewInput();
+        // ^ the container (150 to 844) ends at the window bottom
+        expect(bar.dataset.viewport).toBe('null');
+        expect(viewportBar.style.bottom).toBe('0px');
+
+        // the host moves the container below the window
+        containerRect = new DOMRect(16, 900, 356, 900);
+        notifyContainerResize(mountContainer);
+        expect(bar.dataset.viewport).toBe('null');
+        expect(viewportBar.style.bottom).toBe('0px');
+    });
+
+    describe('in a page that scrolls the container', () => {
+        let frames: FrameRequestCallback[];
+        let page: HTMLElement;
+
+        function runFrames() {
+            act(() => {
+                while (frames.length > 0) frames.shift()!(0);
+            });
+        }
+
+        function mountInPage() {
+            const mounted = mount();
+            page.appendChild(mounted.mountContainer);
+            return mounted;
+        }
+
+        function focusInput() {
+            const input = document.createElement('input');
+            const scrollIntoView = vi.fn();
+            input.scrollIntoView = scrollIntoView;
+            document.body.appendChild(input);
+            act(() => input.focus());
+            return scrollIntoView;
+        }
+
+        function scroll(target: EventTarget, top: number) {
+            containerRect = new DOMRect(16, top, 356, 900);
+            act(() => {
+                target.dispatchEvent(new Event('scroll'));
+            });
+        }
+
+        beforeEach(() => {
+            frames = [];
+            vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+            vi.stubGlobal('cancelAnimationFrame', () => {});
+            // ^ an approval document: the body's box is 900px tall and starts low, in a page that scrolls
+            containerRect = new DOMRect(16, 560, 356, 900);
+            page = document.createElement('main');
+            document.body.appendChild(page);
+        });
+
+        afterEach(() => {
+            page.remove();
+        });
+
+        it('keeps the keyboard and measures the container again when the page scrolls it, with no reveal of the focus', () => {
+            const { bar } = mountInPage();
+            runFrames();
+            const scrollIntoView = focusInput();
+            act(() => {
+                viewport.height = 504;
+                viewport.dispatchEvent(new Event('resize'));
+            });
+            expect(bar.style.bottom).toBe('340px');
+            runFrames();
+            expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+            // the page scrolls the box up until its bottom (700) is 196px under the keyboard's top
+            scroll(page, -200);
+            expect(bar.style.bottom).toBe('196px');
+            expect(bar.dataset.viewport).toBe(JSON.stringify({ top: 0, bottom: 504, height: 504, stableHeight: 900 }));
+            runFrames();
+            expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+            // a scroll that does not move the container is not followed
+            const sibling = document.createElement('div');
+            document.body.appendChild(sibling);
+            scroll(sibling, -250);
+            expect(bar.style.bottom).toBe('196px');
+            sibling.remove();
+        });
+
+        it('tells the keyboard after the page scrolled the container before the edit', () => {
+            const { bar } = mountInPage();
+            runFrames();
+            scroll(document, 200);
+            focusInput();
+            act(() => {
+                viewport.height = 504;
+                viewport.dispatchEvent(new Event('resize'));
+            });
+            expect(bar.style.bottom).toBe('340px');
+            expect(bar.dataset.viewport).toBe(JSON.stringify({ top: 0, bottom: 504, height: 504, stableHeight: 900 }));
+        });
+
+        it('follows the visible bottom with no keyboard while an editor has the focus, with no inset and no reveal', () => {
+            const { root, bar, viewportBar } = mountInPage();
+            runFrames();
+            expect(viewportBar.style.bottom).toBe('0px');
+
+            // a keyboard attached to the tablet: the window keeps its height, and the box (560 to 1460) reaches 616 below it
+            const scrollIntoView = focusInput();
+            expect(bar.dataset.viewport).toBe(JSON.stringify({ top: 0, bottom: 844, height: 844, stableHeight: 900 }));
+            expect(viewportBar.style.bottom).toBe('616px');
+            expect(bar.style.bottom).toBe('0px');
+            expect(root.style.getPropertyValue('--univer-mobile-keyboard-inset')).toBe('0px');
+
+            // the page scrolls the box up; then until the window holds its bottom (800); then down again
+            scroll(page, 200);
+            expect(viewportBar.style.bottom).toBe('256px');
+            scroll(page, -100);
+            expect(bar.dataset.viewport).toBe('null');
+            expect(viewportBar.style.bottom).toBe('0px');
+            scroll(page, 300);
+            expect(viewportBar.style.bottom).toBe('356px');
+            expect(bar.style.bottom).toBe('0px');
+            runFrames();
+            expect(scrollIntoView).not.toHaveBeenCalled();
+        });
+
+        it('lets go of the visible bottom once the focus has left every editor, not while it moves on to another', () => {
+            const { bar, viewportBar } = mountInPage();
+            runFrames();
+            focusInput();
+            expect(viewportBar.style.bottom).toBe('616px');
+
+            const next = focusNewInput();
+            runFrames();
+            expect(viewportBar.style.bottom).toBe('616px');
+
+            // an edit ended with no keyboard to go down: nothing resizes
+            act(() => next.blur());
+            runFrames();
+            expect(bar.dataset.viewport).toBe('null');
+            expect(viewportBar.style.bottom).toBe('0px');
+        });
+
+        it('keeps the keyboard while the focus moves on to another editor', () => {
+            const { bar } = mountInPage();
+            runFrames();
+            focusInput();
+            act(() => {
+                viewport.height = 504;
+                viewport.dispatchEvent(new Event('resize'));
+            });
+            expect(bar.style.bottom).toBe('340px');
+
+            focusNewInput();
+            runFrames();
+            expect(bar.style.bottom).toBe('340px');
+            expect(bar.dataset.viewport).toBe(JSON.stringify({ top: 0, bottom: 504, height: 504, stableHeight: 900 }));
+        });
+    });
+});
+
+describe('isMobileWorkbenchBoxPastVisibleBottom', () => {
+    it('is a box that can be seen and reaches below the visible bottom', () => {
+        expect(isMobileWorkbenchBoxPastVisibleBottom({ height: 900, bottom: 1460 }, 844)).toBe(true);
+        expect(isMobileWorkbenchBoxPastVisibleBottom({ height: 694, bottom: 844 }, 504)).toBe(true);
+    });
+
+    it('is not a box the window holds, to the pixel', () => {
+        expect(isMobileWorkbenchBoxPastVisibleBottom({ height: 694, bottom: 844 }, 844)).toBe(false);
+        expect(isMobileWorkbenchBoxPastVisibleBottom({ height: 694.4, bottom: 844.4 }, 843.8)).toBe(false);
+        expect(isMobileWorkbenchBoxPastVisibleBottom({ height: 800, bottom: 800 }, 844)).toBe(false);
+    });
+
+    it('is not a box that lies all below the visible bottom', () => {
+        expect(isMobileWorkbenchBoxPastVisibleBottom({ height: 900, bottom: 1800 }, 844)).toBe(false);
+    });
+});
+
+describe('isMobileKeyboardOpen', () => {
+    it('tells a keyboard by how much higher the visible bottom is than without one', () => {
+        expect(isMobileKeyboardOpen(504, 844)).toBe(true);
+        expect(isMobileKeyboardOpen(844 - 80, 844)).toBe(true);
+        expect(isMobileKeyboardOpen(844 - 56, 844)).toBe(false);
+        expect(isMobileKeyboardOpen(844, 844)).toBe(false);
+    });
 });
 
 describe('resolveMobileKeyboardInset', () => {
     it('excludes persistent browser chrome and reports only keyboard occlusion', () => {
-        expect(resolveMobileKeyboardInset(900, 700, 200)).toBe(0);
-        expect(resolveMobileKeyboardInset(900, 400, 200)).toBe(300);
+        expect(resolveMobileKeyboardInset(900, 700, 700)).toBe(0);
+        expect(resolveMobileKeyboardInset(900, 400, 700)).toBe(300);
     });
 
     it('uses the visual viewport bottom without displacing the canvas by offsetTop', () => {
-        expect(resolveMobileKeyboardInset(932, 180 + 500, 0)).toBe(252);
+        expect(resolveMobileKeyboardInset(932, 180 + 500, 932)).toBe(252);
     });
 
     it('measures from the container bottom, so a container below a host header counts the whole overlap', () => {
-        expect(resolveMobileKeyboardInset(150 + 694, 504, 0)).toBe(340);
+        expect(resolveMobileKeyboardInset(150 + 694, 504, 844)).toBe(340);
     });
 
     it('reports nothing for a container that ends above the visible bottom', () => {
-        expect(resolveMobileKeyboardInset(150 + 271, 504, 0)).toBe(0);
-        expect(resolveMobileKeyboardInset(504 + 60, 504, 0)).toBe(0);
+        expect(resolveMobileKeyboardInset(150 + 271, 504, 844)).toBe(0);
+        expect(resolveMobileKeyboardInset(504, 504, 844)).toBe(0);
+    });
+
+    it('counts the part of a container that ends under the keyboard', () => {
+        expect(resolveMobileKeyboardInset(504 + 60, 504, 844)).toBe(60);
+    });
+
+    it('counts no more than the keyboard of a container that reaches below the window, wherever the page puts it', () => {
+        expect(resolveMobileKeyboardInset(560 + 900, 504, 844)).toBe(340);
+        expect(resolveMobileKeyboardInset(200 + 900, 504, 844)).toBe(340);
+    });
+
+    it('reports nothing without a keyboard', () => {
+        expect(resolveMobileKeyboardInset(560 + 900, 844 - 56, 844)).toBe(0);
     });
 });
 

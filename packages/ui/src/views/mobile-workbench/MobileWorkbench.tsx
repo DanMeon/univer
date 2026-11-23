@@ -15,6 +15,7 @@
  */
 
 // Modified by Carenode, 2026 — the mobile workbench takes its width, its height and the keyboard overlap from its mount container, not from the window
+// Modified by Carenode, 2026 — CNT-5176 mobile-keyboard-visible-height: the keyboard is told by how much shorter the visible viewport got, wherever the container is, and the layout follows a page that scrolls the container and, while an editor has the focus, the visible bottom of a container that reaches below it with no keyboard
 
 import type { Injector } from '@univerjs/core';
 import type { IMobileKeyboardViewport } from '@univerjs/design';
@@ -46,14 +47,26 @@ import { MobileCanvasLayoutProvider } from './MobileCanvasLayout';
 const MOBILE_KEYBOARD_THRESHOLD = 80;
 
 /**
- * How many CSS pixels of the workbench the on-screen keyboard covers: how far the mount container reaches below the
- * bottom of the visible viewport (both in layout-viewport coordinates), less the overlap that was there without a
- * keyboard (`baselineInset`, such as browser chrome over the page). A host that already shrank the container above
- * the keyboard leaves no overlap. Less than the threshold is not a keyboard.
+ * Whether an on-screen keyboard is up: the bottom of the visible viewport is the threshold or more above where it was
+ * without one (`stableVisibleBottom`, layout-viewport coordinates). Where the mount container is plays no part — a page
+ * that scrolls the container up or down opens and closes no keyboard. Less than the threshold is browser chrome.
  */
-export function resolveMobileKeyboardInset(containerBottom: number, visibleBottom: number, baselineInset: number): number {
-    const keyboardInset = Math.max(0, Math.round(containerBottom - visibleBottom) - baselineInset);
-    return keyboardInset >= MOBILE_KEYBOARD_THRESHOLD ? keyboardInset : 0;
+export function isMobileKeyboardOpen(visibleBottom: number, stableVisibleBottom: number): boolean {
+    return stableVisibleBottom - visibleBottom >= MOBILE_KEYBOARD_THRESHOLD;
+}
+
+/**
+ * How many CSS pixels of the workbench the on-screen keyboard covers: the part of the mount container between the
+ * bottom of the visible viewport and where that bottom was without a keyboard, measured from the container's bottom
+ * edge as it is now (all in layout-viewport coordinates). A host that shrank the container above the keyboard leaves
+ * nothing covered, and what lies below the visible bottom without a keyboard (browser chrome over the page, the rest
+ * of a page that scrolls) is not the keyboard's.
+ */
+export function resolveMobileKeyboardInset(containerBottom: number, visibleBottom: number, stableVisibleBottom: number): number {
+    if (!isMobileKeyboardOpen(visibleBottom, stableVisibleBottom)) {
+        return 0;
+    }
+    return Math.max(0, Math.round(Math.min(containerBottom, stableVisibleBottom) - visibleBottom));
 }
 
 export interface IMobileWorkbenchBox {
@@ -70,6 +83,15 @@ export interface IMobileWorkbenchBox {
 export function resolveMobileWorkbenchBox(rect: Pick<DOMRect, 'top' | 'height'>, windowHeight: number): IMobileWorkbenchBox {
     const height = rect.height || windowHeight;
     return { height, bottom: rect.top + height };
+}
+
+/**
+ * Whether some of the box can be seen and the rest lies below the bottom of the visible viewport, as a tall box in a
+ * page that scrolls does (layout-viewport coordinates, whole pixels).
+ */
+export function isMobileWorkbenchBoxPastVisibleBottom(box: IMobileWorkbenchBox, visibleBottom: number): boolean {
+    const bottom = Math.round(visibleBottom);
+    return Math.round(box.bottom - box.height) < bottom && Math.round(box.bottom) > bottom;
 }
 
 export interface IUniverAppProps extends IWorkbenchOptions {
@@ -183,17 +205,20 @@ export function MobileWorkbench(props: IUniverAppProps) {
             return undefined;
         }
 
-        // ^ The root is always as tall as the mount container is now, and the keyboard is measured against the
-        //   container's bottom edge. A host may put the container anywhere on the page, size it from the visual
-        //   viewport a frame after the window resized, or change it with no window resize at all (a panel above it).
+        // ^ The root is always as tall as the mount container is now, and what the keyboard covers is measured against
+        //   the container's bottom edge. A host may put the container anywhere on the page, size it from the visual
+        //   viewport a frame after the window resized, change it with no window resize at all (a panel above it), or
+        //   scroll it with the page.
         let box = resolveMobileWorkbenchBox(mountContainer.getBoundingClientRect(), window.innerHeight);
-        let baselineInset = Math.max(0, Math.round(box.bottom - (
-            visualViewport ? visualViewport.offsetTop + visualViewport.height : window.innerHeight
-        )));
+        // ^ Where the bottom of the visible viewport is without a keyboard: it follows the window while nothing is
+        //   edited, only rises while an editor has the focus, and is taken anew when the window turns.
+        let stableVisibleBottom = visualViewport ? visualViewport.offsetTop + visualViewport.height : window.innerHeight;
+        let stableWidth = window.innerWidth;
         let keyboardVisible = false;
         let initialViewportFrame: number | null = null;
         let revealFrame: number | null = null;
         let revealInnerFrame: number | null = null;
+        let focusOutFrame: number | null = null;
 
         const isEditing = () => {
             const activeElement = document.activeElement;
@@ -226,35 +251,36 @@ export function MobileWorkbench(props: IUniverAppProps) {
                 });
             });
         };
-        const updateKeyboardViewport = () => {
+        const updateKeyboardViewport = (revealFocus: boolean) => {
             const visibleTop = visualViewport?.offsetTop ?? 0;
             const visibleHeight = visualViewport?.height ?? window.innerHeight;
             const visibleBottom = visualViewport
                 ? visibleTop + visibleHeight
                 : window.innerHeight;
-            const viewportInset = Math.max(0, Math.round(box.bottom - visibleBottom));
-            const keyboardInset = resolveMobileKeyboardInset(box.bottom, visibleBottom, baselineInset);
             const editing = isEditing();
 
-            if (!editing) {
-                keyboardVisible = false;
-                if (keyboardInset === 0) {
-                    baselineInset = viewportInset;
-                }
-            } else if (keyboardInset > 0) {
-                keyboardVisible = true;
-            } else if (keyboardVisible && keyboardInset === 0) {
-                keyboardVisible = false;
-                baselineInset = viewportInset;
+            if (window.innerWidth !== stableWidth) {
+                stableWidth = window.innerWidth;
+                stableVisibleBottom = Math.max(window.innerHeight, visibleBottom);
+            } else if (editing) {
+                stableVisibleBottom = Math.max(stableVisibleBottom, visibleBottom);
+            } else {
+                stableVisibleBottom = visibleBottom;
             }
 
-            viewportElement.style.setProperty(
-                '--univer-mobile-keyboard-inset',
-                `${keyboardVisible ? keyboardInset : 0}px`
-            );
+            keyboardVisible = editing && isMobileKeyboardOpen(visibleBottom, stableVisibleBottom);
+            const nextKeyboardInset = keyboardVisible
+                ? resolveMobileKeyboardInset(box.bottom, visibleBottom, stableVisibleBottom)
+                : 0;
+            viewportElement.style.setProperty('--univer-mobile-keyboard-inset', `${nextKeyboardInset}px`);
 
-            const nextKeyboardInset = keyboardVisible ? keyboardInset : 0;
-            const nextKeyboardViewport = keyboardVisible
+            // ^ With no on-screen keyboard (one attached to a tablet), an editor still needs the input bar where it can
+            //   be seen: while the container reaches below the visible bottom the layout follows the visible viewport
+            //   as it does with a keyboard. The inset stays the keyboard's, and only a keyboard asks for a reveal of
+            //   the focused element — the page is the person's to scroll.
+            const followVisibleViewport = keyboardVisible ||
+                (editing && isMobileWorkbenchBoxPastVisibleBottom(box, visibleBottom));
+            const nextKeyboardViewport = followVisibleViewport
                 ? {
                     top: Math.round(visibleTop),
                     bottom: Math.round(visibleBottom),
@@ -264,12 +290,37 @@ export function MobileWorkbench(props: IUniverAppProps) {
                 : null;
             setKeyboardInset(nextKeyboardInset);
             setKeyboardViewport(nextKeyboardViewport);
-            scheduleReveal(nextKeyboardViewport);
+            if (revealFocus) {
+                scheduleReveal(keyboardVisible ? nextKeyboardViewport : null);
+            }
         };
-        const updateViewport = () => {
+        const measureViewport = (revealFocus: boolean) => {
             box = resolveMobileWorkbenchBox(mountContainer.getBoundingClientRect(), window.innerHeight);
             viewportElement.style.height = `${box.height}px`;
-            updateKeyboardViewport();
+            updateKeyboardViewport(revealFocus);
+        };
+        const updateViewport = () => measureViewport(true);
+        // ^ A page that scrolls moves the container with nothing resized: measuring again holds the input bar at the
+        //   bottom of the visible viewport. It asks for no reveal of the focused element, which would scroll the page
+        //   back against the person scrolling it.
+        const followAncestorScroll = (event: Event) => {
+            if (event.target instanceof Node && event.target.contains(mountContainer)) {
+                measureViewport(false);
+            }
+        };
+        // ^ With no keyboard to go down, an edit ends with nothing resized: once the focus has left every editor the
+        //   layout stops following the visible viewport. A frame later, so a focus that moves on to another editor
+        //   keeps it; what the keyboard covers waits for the window, as before.
+        const followFocusOut = () => {
+            if (focusOutFrame != null) {
+                cancelAnimationFrame(focusOutFrame);
+            }
+            focusOutFrame = requestAnimationFrame(() => {
+                focusOutFrame = null;
+                if (!keyboardVisible && !isEditing()) {
+                    setKeyboardViewport(null);
+                }
+            });
         };
 
         viewportElement.style.height = `${box.height}px`;
@@ -285,10 +336,16 @@ export function MobileWorkbench(props: IUniverAppProps) {
         visualViewport?.addEventListener('resize', updateViewport);
         visualViewport?.addEventListener('scroll', updateViewport);
         document.addEventListener('focusin', updateViewport);
+        document.addEventListener('focusout', followFocusOut);
+        // ^ a scroll of an element does not bubble: the capture phase on the document sees the scroll of every ancestor
+        document.addEventListener('scroll', followAncestorScroll, { capture: true, passive: true });
 
         return () => {
             if (initialViewportFrame != null) {
                 cancelAnimationFrame(initialViewportFrame);
+            }
+            if (focusOutFrame != null) {
+                cancelAnimationFrame(focusOutFrame);
             }
             cancelReveal();
             containerObserver.disconnect();
@@ -296,6 +353,8 @@ export function MobileWorkbench(props: IUniverAppProps) {
             visualViewport?.removeEventListener('resize', updateViewport);
             visualViewport?.removeEventListener('scroll', updateViewport);
             document.removeEventListener('focusin', updateViewport);
+            document.removeEventListener('focusout', followFocusOut);
+            document.removeEventListener('scroll', followAncestorScroll, { capture: true });
         };
     }, [mountContainer]);
 
