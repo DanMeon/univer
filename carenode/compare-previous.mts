@@ -10,9 +10,15 @@
 //     when its module is one of the changed files. Identifier suffixes the bundler adds to avoid name clashes
 //     (`name$1`) are ignored, because a new name in a changed module can renumber them elsewhere. A declaration file
 //     lib/types/<path>.d.ts may differ only when src/<path>.ts(x) changed. Derived files - the import block before the
-//     first module, the export block after the last, a bundle without module markers (UMD), and the Tailwind CSS -
-//     may differ only in such a package, and are listed. So is the declaration of an unchanged source file that only
-//     names another of its imports where one of the two comes from a changed file (changedImportBehind).
+//     first module, the export block after the last, and a bundle without module markers (UMD) - may differ only in
+//     such a package, and are listed. So is the declaration of an unchanged source file that only names another of
+//     its imports where one of the two comes from a changed file (changedImportBehind),
+//   - a stylesheet, decided in this order (previousStylesheetVerdict in fork.mts): lib/index.css that in both builds is
+//     the join of the stylesheets of its style dependencies (a preset, `univer-cli preset build`) may differ only when
+//     each style dependency whose stylesheet differs has a stylesheet input changed since the previous tag, whatever
+//     the package's own source did (listed as a style dependency difference); any other stylesheet, the Tailwind CSS
+//     generated from the package's source, may differ only when a .ts or .tsx source file of the package changed
+//     (listed as derived).
 // Anything else fails, and so does a package without a changed source file whose built code differs. A changed file
 // whose build shows no difference is listed (a comment-only change shows nothing, since the bundles drop comments).
 //
@@ -41,6 +47,7 @@ import {
     log,
     pairHashedChunks,
     parseForkVersion,
+    previousStylesheetVerdict,
     readJson,
     run,
     writeJson,
@@ -60,6 +67,8 @@ interface IPackageResult {
     files: number;
     attributed: IDifference[];
     derived: IDifference[];
+    /** The stylesheet of a preset, made by style dependencies whose source changed (styleDependencyChanges). */
+    styleDependency: IDifference[];
     disallowed: IDifference[];
     noVisibleEffect: string[];
 }
@@ -119,6 +128,17 @@ if (values.download) {
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'carenode-previous-'));
 const results: IPackageResult[] = [];
+// Source files changed since the previous tag, relative to the package directory, by upstream name.
+const changedSourceOf = new Map(selection.packages.map((pkg) => [
+    pkg.name,
+    run('git', ['diff', '--name-only', previousTag, 'HEAD', '--', `${pkg.dir}/src`])
+        .split('\n')
+        .filter((file) => file && !isTestSource(file))
+        .map((file) => path.posix.relative(pkg.dir, file)),
+]));
+// Previous and built package roots by upstream name. The selection lists a package after its dependencies, so a preset's
+// style dependencies are extracted before it.
+const extracted = new Map<string, readonly [string, string]>();
 
 for (const pkg of selection.packages) {
     const previousFile = previousFiles.get(pkg.forkName);
@@ -126,10 +146,7 @@ for (const pkg of selection.packages) {
     if (!previousFile || !builtEntry) {
         fail(`${pkg.forkName}: previous tarball ${previousFile ? 'found' : 'missing'}, built tarball ${builtEntry ? 'found' : 'missing'}`);
     }
-    const changedSource = run('git', ['diff', '--name-only', previousTag, 'HEAD', '--', `${pkg.dir}/src`])
-        .split('\n')
-        .filter((file) => file && !isTestSource(file))
-        .map((file) => path.posix.relative(pkg.dir, file));
+    const changedSource = changedSourceOf.get(pkg.name)!;
     const result: IPackageResult = {
         name: pkg.forkName,
         previous: previousFile,
@@ -138,6 +155,7 @@ for (const pkg of selection.packages) {
         files: 0,
         attributed: [],
         derived: [],
+        styleDependency: [],
         disallowed: [],
         noVisibleEffect: [],
     };
@@ -146,6 +164,7 @@ for (const pkg of selection.packages) {
 
     const previousRoot = extractTarball(path.join(previousDir, previousFile), tempRoot);
     const builtRoot = extractTarball(path.join(values.built, builtEntry.file), tempRoot);
+    extracted.set(pkg.name, [previousRoot, builtRoot]);
     const previousList = listFiles(previousRoot);
     const builtList = listFiles(builtRoot);
     const previousSet = new Set(previousList);
@@ -208,11 +227,25 @@ for (const pkg of selection.packages) {
             }
             return;
         }
-        if (file.endsWith('.css') && changedSource.some((source) => /\.tsx?$/.test(source))) {
-            derive(file, 'stylesheet generated from the source');
+        const kind = a === undefined ? 'only-in-build' : b === undefined ? 'only-in-previous' : 'content';
+        if (file.endsWith('.css')) {
+            const verdict = previousStylesheetVerdict(
+                file,
+                pkg,
+                selection,
+                (name) => extracted.get(name) ?? fail(`${name} is not extracted before ${pkg.name}, which depends on it`),
+                (dependency) => changedSourceOf.get(dependency.name)!
+            );
+            if (verdict.kind === 'style-dependency') {
+                result.styleDependency.push({ file, kind: 'style-dependency', detail: verdict.detail });
+            } else if (verdict.kind === 'derived') {
+                derive(file, verdict.detail);
+            } else {
+                result.disallowed.push({ file, kind, detail: verdict.detail });
+            }
             return;
         }
-        result.disallowed.push({ file, kind: a === undefined ? 'only-in-build' : b === undefined ? 'only-in-previous' : 'content' });
+        result.disallowed.push({ file, kind });
     };
 
     for (const file of previousList.filter((f) => !builtSet.has(f) && !pairedPrevious.has(f))) {
@@ -357,6 +390,7 @@ function readmeBody(text: string): string | undefined {
 }
 
 const disallowed = results.flatMap((r) => r.disallowed.map((d) => ({ name: r.name, ...d })));
+const styleDependency = results.flatMap((r) => r.styleDependency.map((d) => ({ name: r.name, ...d })));
 const changedPackages = results.filter((r) => r.changedSource.length > 0);
 writeJson(values.report, {
     version: current.version,
@@ -369,6 +403,7 @@ writeJson(values.report, {
         changedPackages: changedPackages.length,
         attributed: results.reduce((sum, r) => sum + r.attributed.length, 0),
         derived: results.reduce((sum, r) => sum + r.derived.length, 0),
+        styleDependency: styleDependency.length,
         disallowed: disallowed.length,
     },
 });
@@ -379,8 +414,9 @@ for (const r of changedPackages) {
     for (const d of r.derived) log(`  derived ${d.file}: ${d.detail}`);
     for (const source of r.noVisibleEffect) log(`  no visible effect: ${source}`);
 }
+for (const d of styleDependency) log(`style dependency ${d.name} ${d.file}: ${d.detail}`);
 for (const d of disallowed) log(`DIFF ${d.name} ${d.file}: ${d.kind}${d.detail ? ` (${d.detail})` : ''}`);
-log(`previous release (${current.version} vs ${previousVersion} from ${values.download ? 'npm' : previousDir}): ${results.length} packages, ${changedPackages.length} with changed source, differences outside the changed source: ${disallowed.length}`);
+log(`previous release (${current.version} vs ${previousVersion} from ${values.download ? 'npm' : previousDir}): ${results.length} packages, ${changedPackages.length} with changed source, ${styleDependency.length} stylesheet(s) made by changed style dependencies, differences outside the changed source: ${disallowed.length}`);
 if (disallowed.length > 0) {
     process.exitCode = 1;
 }

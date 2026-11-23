@@ -159,6 +159,132 @@ export function isTestSource(file: string): boolean {
     return /(?:^|\/)__tests__\//.test(file) || /\.(?:spec|test)\.[cm]?[jt]sx?$/.test(file);
 }
 
+/** The stylesheet a package ships: tsdown writes the CSS a package imports there, a preset build its joined stylesheet. */
+export const STYLESHEET = 'lib/index.css';
+
+/**
+ * Whether a source file, relative to its package, is an input of the package's stylesheet: a .js, .ts, .jsx or .tsx
+ * file under src, which the Tailwind content scans (SOURCE_CONTENT in common/shared/tailwind/tailwind.config.ts), or a
+ * stylesheet under src (src/global.css, the entry each package imports).
+ */
+export function isStylesheetInput(file: string): boolean {
+    return /^src\/.+\.(?:jsx?|tsx?|css)$/.test(file);
+}
+
+/**
+ * The style dependencies of the selected package `pkg`, in manifest order: its `dependencies` named `@univerjs*` whose
+ * package has a src/global.css. A preset (`univer-cli preset build`) has no stylesheet source of its own: it ships as
+ * lib/index.css the built stylesheets of these packages, joined (joinStylesheets). Upstream owns the rule:
+ * getBuiltStyleDependencyCssFiles in common/shared/preset-build/style.ts, which writes the file (createTailwindContent in
+ * common/shared/tailwind/tailwind.config.ts picks the same packages for a preset's Tailwind content, which does not make
+ * the shipped file). Upstream looks each dependency up in the package's node_modules; this takes its workspace directory
+ * from the selection, so it needs no install (the previous-release job of carenode-release.yml has none). A workspace
+ * dependency of a selected package is always selected (select-packages.mts selects the production closure), so one
+ * outside the selection throws. A dependency installed from the registry (@univerjs/icons) is not built here and is left
+ * out: none ships a src/global.css, and if one did, the stylesheet would not be the join and the comparison would fail.
+ * Run from the workspace root.
+ */
+export function styleDependenciesOf(pkg: ISelectedPackage, selection: ISelection): ISelectedPackage[] {
+    const manifest = readJson<{ dependencies?: Record<string, string> }>(path.join(pkg.dir, 'package.json'));
+    const selected = new Map(selection.packages.map((entry) => [entry.name, entry]));
+    return Object.entries(manifest.dependencies ?? {}).flatMap(([name, spec]) => {
+        if (!name.startsWith('@univerjs')) return [];
+        const dependency = selected.get(name);
+        if (!dependency) {
+            if (spec.startsWith('workspace:')) {
+                throw new Error(`${pkg.name} depends on the workspace package ${name}, which is not in the selection`);
+            }
+            return [];
+        }
+        return fs.existsSync(path.join(dependency.dir, 'src/global.css')) ? [dependency] : [];
+    });
+}
+
+/** A preset's lib/index.css from its style dependencies' stylesheets, as writePresetCss in common/shared/preset-build/style.ts writes it. */
+function joinStylesheets(parts: string[]): string {
+    return `${parts.map((part) => part.trimEnd()).filter(Boolean).join('\n')}\n`;
+}
+
+/**
+ * Whether the stylesheet of the selected package `pkg` is joined from the stylesheets of its style dependencies
+ * (styleDependenciesOf), and if so whether its difference between two builds is theirs. `joined`: in each build it is
+ * the join of theirs in that build, as a preset build writes it. `allowed`: it is joined, and each style dependency whose
+ * stylesheet differs has a changed stylesheet input (isStylesheetInput); that dependency's own stylesheet is compared in
+ * its own package.
+ *   roots(name)             the extracted `package/` roots of a selected package in the two builds
+ *   changedSource(package)  the changed source files of a selected package, relative to its directory
+ * `detail` names the style dependencies whose stylesheet differs and their changed inputs, or says why the difference
+ * is not theirs.
+ */
+export function styleDependencyChanges(
+    pkg: ISelectedPackage,
+    selection: ISelection,
+    roots: (name: string) => readonly [string, string],
+    changedSource: (dependency: ISelectedPackage) => string[]
+): { joined: boolean; allowed: boolean; detail: string } {
+    const dependencies = styleDependenciesOf(pkg, selection);
+    if (dependencies.length === 0) {
+        return { joined: false, allowed: false, detail: `${STYLESHEET} is not joined from style dependencies (the package has none)` };
+    }
+    const stylesheets = (name: string): (string | undefined)[] => roots(name).map((root) => {
+        const file = path.join(root, STYLESHEET);
+        return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
+    });
+    const own = stylesheets(pkg.name);
+    const parts = dependencies.map((dependency) => stylesheets(dependency.name));
+    for (const side of [0, 1]) {
+        const present = parts.map((pair) => pair[side]).filter((part): part is string => part !== undefined);
+        if (own[side] === undefined || present.length < parts.length || own[side] !== joinStylesheets(present)) {
+            const names = dependencies.map((dependency) => dependency.name).join(', ');
+            return { joined: false, allowed: false, detail: `${STYLESHEET} is not the join of the stylesheets of its style dependencies (${names}) in one of the two builds` };
+        }
+    }
+    const changed: string[] = [];
+    for (const [index, dependency] of dependencies.entries()) {
+        if (parts[index][0] === parts[index][1]) continue;
+        const files = changedSource(dependency).filter(isStylesheetInput);
+        if (files.length === 0) {
+            return { joined: true, allowed: false, detail: `${STYLESHEET} is joined from the stylesheets of its style dependencies; the stylesheet of ${dependency.name} differs, but no stylesheet input of ${dependency.name} changed` };
+        }
+        changed.push(`${dependency.name} (${files.join(', ')})`);
+    }
+    if (changed.length === 0) {
+        return { joined: true, allowed: false, detail: `${STYLESHEET} is joined from the stylesheets of its style dependencies, and none of them differs` };
+    }
+    return { joined: true, allowed: true, detail: `joined from the stylesheets of its style dependencies; changed in ${changed.join('; ')}` };
+}
+
+/**
+ * The verdict of compare-previous.mts on a difference in a stylesheet (a .css file) of the selected package `pkg` between
+ * the previous release and this build, in this order:
+ *   1. lib/index.css joined from the stylesheets of its style dependencies (styleDependencyChanges): only their rule
+ *      decides, whatever the package's own source did, since a joined stylesheet reads none of it
+ *      (`style-dependency`, or `failed`);
+ *   2. any other stylesheet is generated from the package's source: it may differ when a .ts or .tsx source file of the
+ *      package changed (`derived`);
+ *   3. anything else fails, naming both reasons.
+ *   roots(name)             the extracted `package/` roots of a selected package in the previous and this build
+ *   changedSource(package)  the source files of a selected package changed since the previous release, relative to its
+ *                           directory, tests excluded
+ */
+export function previousStylesheetVerdict(
+    file: string,
+    pkg: ISelectedPackage,
+    selection: ISelection,
+    roots: (name: string) => readonly [string, string],
+    changedSource: (dependency: ISelectedPackage) => string[]
+): { kind: 'style-dependency' | 'derived' | 'failed'; detail: string } {
+    const dependencies = file === STYLESHEET ? styleDependencyChanges(pkg, selection, roots, changedSource) : undefined;
+    if (dependencies?.joined) {
+        return { kind: dependencies.allowed ? 'style-dependency' : 'failed', detail: dependencies.detail };
+    }
+    if (changedSource(pkg).some((source) => /\.tsx?$/.test(source))) {
+        return { kind: 'derived', detail: 'stylesheet generated from the source' };
+    }
+    const noSource = 'no .ts or .tsx source file of the package changed since the previous release';
+    return { kind: 'failed', detail: dependencies ? `${noSource}, and ${dependencies.detail}` : noSource };
+}
+
 /**
  * Pair files that exist on one side only and differ only by the content hash in their name: same directory,
  * same stem, same extension, exactly one candidate on each side. Ambiguous names stay unpaired (and fail).

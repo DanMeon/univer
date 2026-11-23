@@ -37,21 +37,35 @@ Pushing a `v*-carenode.*` tag runs, on the runner and toolchain of upstream's `r
    bundles), install, build, `select-packages.mts`, `rename-packages.mts` (after the build; the README notice lists
    the changed source files, tests excluded since they are not packed), `pack-packages.mts`, `check-packs.mts`, and
    layer 2 — compare with the official tarballs, allowing only the differences listed at the top of
-   `compare-official.mts`;
+   `compare-official.mts` (and a preset's stylesheet, see below);
 3. for `N >= 1`, previous release — `compare-previous.mts` compares the build file by file with the previous release
    `<base>-carenode.<N-1>`: besides the version, chunk names and the README notice, built code may differ only in the
    modules (and declaration files) of source files changed since tag `v<base>-carenode.<N-1>`; derived files (import
-   and export blocks, the UMD bundle, the Tailwind CSS) may differ only in such a package, and the declaration of an
-   unchanged file only where its inferred type names another import and one of the two comes from a changed file.
-   Anything else fails the run. For `N >= 2` the previous release is downloaded from npm (`--download`) and must be
-   public. For `N = 1` it is the unpublished baseline `<base>-carenode.0`: the job takes the `univer-<base>-carenode.0`
-   artifact of the latest successful run of this workflow on tag `v<base>-carenode.0` at the tag's commit (the tag
-   push, or a manual run on the tag ref), checks its `SHA256SUMS` and compares with it (`--previous <dir>` without
-   `--download`). With no such run or artifact (artifacts expire after 90 days) the job fails;
+   and export blocks, the UMD bundle) may differ only in such a package, and the declaration of an unchanged file only
+   where its inferred type names another import and one of the two comes from a changed file; the Tailwind CSS only
+   where a `.ts` or `.tsx` source file of the package changed, and a preset's stylesheet as below. Anything else fails
+   the run. For `N >= 2` the previous release is downloaded from npm (`--download`) and must be public. For `N = 1` it
+   is the unpublished baseline `<base>-carenode.0`: the job takes the `univer-<base>-carenode.0` artifact of the latest
+   successful run of this workflow on tag `v<base>-carenode.0` at the tag's commit (the tag push, or a manual run on
+   the tag ref), checks its `SHA256SUMS` and compares with it (`--previous <dir>` without `--download`). With no such
+   run or artifact (artifacts expire after 90 days) the job fails;
    `gh workflow run carenode-release.yml --ref v<base>-carenode.0 -f version=<base>-carenode.0` builds it again;
 4. for `N >= 1`, once steps 1 to 3 pass, stage the tarballs on npm through trusted publishing (`publish.sh stage`).
    Nothing is public until a maintainer approves the staged versions with 2FA. `N = 0` only leaves the tarballs as
    the run's `univer-<version>` artifact, the baseline that step 3 of `N = 1` compares with.
+
+A preset (`univer-cli preset build`, e.g. `@univerjs/preset-sheets-core`) has no stylesheet source of its own: its
+`lib/index.css` is the built `lib/index.css` of its style dependencies, joined — its `@univerjs*` dependencies that
+have a `src/global.css` (`common/shared/preset-build/style.ts`). So a fix in one of them changes the preset's
+stylesheet too. Such a `lib/index.css` may differ when, in both builds, it is that join, and every style dependency
+whose stylesheet differs has a changed stylesheet input (a `.js`, `.ts`, `.jsx`, `.tsx` or `.css` file under its
+`src`; `styleDependencyChanges` in `fork.mts`). Layer 2 applies this where the package's own source does not differ
+from the upstream tag (otherwise its `lib/` may differ anyway) and reports it as `style-dependency:content`. Step 3
+applies it, with changes since the previous tag, to every stylesheet that is such a join, whatever the package's own
+source did — a joined stylesheet reads none of it — and lists it as `style dependency` with the dependency and its
+files; only a stylesheet that is not a join falls back to the `.ts`/`.tsx` rule (`previousStylesheetVerdict` in
+`fork.mts`). A style dependency is a production dependency, so it is always selected; one installed from the registry
+(`@univerjs/icons`) is not built here and has no `src/global.css`.
 
 A manual run (`workflow_dispatch` with a version) does steps 1 to 3 (step 3 for `N >= 1`) and never stages. On a
 maintainer's machine, `compare-previous.mts --previous <dir>` without `--download` compares with any downloaded

@@ -14,7 +14,11 @@
 //                   - a LICENSE equal to the workspace LICENSE where the official tarball has none (pnpm skips its
 //                     LICENSE copy when a packed file is named like a license, e.g. @univerjs/protocol's license.d.ts),
 //                   - lib/ files of a package whose source files differ from the upstream tag (listed in its README;
-//                     reported, not failed).
+//                     reported, not failed),
+//                   - lib/index.css of a package whose own source does not differ, when in both builds it is the join of
+//                     the stylesheets of its style dependencies (a preset, `univer-cli preset build`) and each style
+//                     dependency whose stylesheet differs has a changed stylesheet input (styleDependencyChanges in
+//                     fork.mts; reported as style-dependency:*, not failed).
 //                 Anything else fails.
 //
 // usage: node carenode/compare-official.mts --mode exact|fork --selection <selection.json> --built <tarball dir>
@@ -26,7 +30,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
-import type { IIdentityManifest, IPackManifest, ISelection } from './fork.mts';
+import type { IIdentityManifest, IPackManifest, ISelectedPackage, ISelection } from './fork.mts';
 import {
     applyForkIdentity,
     DEPENDENCY_FIELDS,
@@ -41,6 +45,8 @@ import {
     parseForkVersion,
     readJson,
     run,
+    styleDependencyChanges,
+    STYLESHEET,
     writeJson,
 } from './fork.mts';
 
@@ -98,6 +104,9 @@ const officialBySpec = new Map(downloaded.map((entry) => [entry.id, entry]));
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'carenode-compare-'));
 const results: IPackageResult[] = [];
+// Official and built package roots by upstream name. The selection lists a package after its dependencies, so a preset's
+// style dependencies are extracted before it.
+const extracted = new Map<string, readonly [string, string]>();
 
 for (const pkg of selection.packages) {
     const official = officialBySpec.get(`${pkg.name}@${base}`);
@@ -107,6 +116,7 @@ for (const pkg of selection.packages) {
     }
     const officialRoot = extractTarball(path.join(officialDir, official.filename), tempRoot);
     const builtRoot = extractTarball(path.join(values.built, builtEntry.file), tempRoot);
+    extracted.set(pkg.name, [officialRoot, builtRoot]);
     const result: IPackageResult = {
         name: pkg.name,
         official: { file: official.filename, integrity: official.integrity },
@@ -173,6 +183,8 @@ for (const pkg of selection.packages) {
         if (Buffer.from(text, 'latin1').equals(a)) {
             if (versionCount > 0) result.allowed.push({ file, kind: 'version-string', detail: `${versionCount}x ${fork!.base} -> ${fork!.version}` });
             if (hashCount > 0 || officialFile !== builtFile) result.allowed.push({ file, kind: 'chunk-hash', detail: `${hashCount} chunk name(s)` });
+        } else if (!sourceChanged && file === STYLESHEET) {
+            noteStylesheet(result, pkg, { file, kind: 'content', detail: `${a.length} vs ${b.length} bytes` });
         } else {
             note(result, sourceChanged && officialFile.startsWith('lib/'), { file, kind: 'content', detail: `${a.length} vs ${b.length} bytes` });
         }
@@ -185,6 +197,23 @@ function note(result: IPackageResult, allowedAsChangedSource: boolean, differenc
         result.allowed.push({ ...difference, kind: `changed-source:${difference.kind}` });
     } else {
         result.disallowed.push(difference);
+    }
+}
+
+/** A stylesheet difference in a package whose own source does not differ: allowed when its style dependencies make it. */
+function noteStylesheet(result: IPackageResult, pkg: ISelectedPackage, difference: IDifference): void {
+    const verdict = styleDependencyChanges(
+        pkg,
+        selection,
+        (name) => extracted.get(name) ?? fail(`${name} is not extracted before ${pkg.name}, which depends on it`),
+        (dependency) => (dependency.changedFiles ?? []).map((file) => path.posix.relative(dependency.dir, file))
+    );
+    const reason = verdict.joined ? verdict.detail : `no source file of the package changed since ${fork!.baseTag}, and ${verdict.detail}`;
+    const detail = `${difference.detail}; ${reason}`;
+    if (verdict.allowed) {
+        result.allowed.push({ ...difference, kind: `style-dependency:${difference.kind}`, detail });
+    } else {
+        result.disallowed.push({ ...difference, detail });
     }
 }
 
@@ -264,7 +293,8 @@ const disallowed = results.flatMap((r) => r.disallowed.map((d) => ({ name: r.nam
 const allowedKinds = new Map<string, number>();
 for (const r of results) {
     for (const a of r.allowed) {
-        const kind = a.kind.startsWith('changed-source') ? 'changed-source' : a.kind;
+        // changed-source:<kind> and style-dependency:<kind> count by their prefix.
+        const kind = a.kind.replace(/:.*/, '');
         allowedKinds.set(kind, (allowedKinds.get(kind) ?? 0) + 1);
     }
 }
@@ -279,6 +309,7 @@ writeJson(values.report, {
 for (const r of results) {
     for (const d of r.disallowed) log(`DIFF ${r.name} ${d.file}: ${d.kind}${d.detail ? ` (${d.detail})` : ''}`);
     for (const a of r.allowed.filter((x) => x.kind.startsWith('changed-source'))) log(`changed source ${r.name} ${a.file}: ${a.kind}`);
+    for (const a of r.allowed.filter((x) => x.kind.startsWith('style-dependency'))) log(`style dependency ${r.name} ${a.file}: ${a.kind} (${a.detail})`);
 }
 const verdict = mode === 'fork'
     ? `allowed differences ${JSON.stringify(Object.fromEntries(allowedKinds))}, differences outside the allowed list: ${disallowed.length}`
