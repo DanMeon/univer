@@ -14,12 +14,16 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — a sheet cell editor and the formula bar give typed text no default colour (xlsxkit cell-editor-no-default-colour)
+
 import type { ITextStyle } from '@univerjs/core';
 import {
     CommandService,
     ConfigService,
     ContextService,
     DesktopLogService,
+    DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
+    DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
     DocumentDataModel,
     ICommandService,
     IConfigService,
@@ -85,7 +89,7 @@ function createService(defaultTextColor?: string): DocMenuStyleService {
     return injector.get(DocMenuStyleService);
 }
 
-function createStyleTestBed(textStyle?: ITextStyle) {
+function createStyleTestBed(textStyle?: ITextStyle, unitId = 'doc-menu-style') {
     const injector = new Injector();
     injector.add([ILogService, { useClass: DesktopLogService }]);
     injector.add([IConfigService, { useClass: ConfigService }]);
@@ -99,7 +103,7 @@ function createStyleTestBed(textStyle?: ITextStyle) {
 
     const univerInstanceService = injector.get(IUniverInstanceService) as UniverInstanceService;
     univerInstanceService.__addUnit(new DocumentDataModel({
-        id: 'doc-menu-style',
+        id: unitId,
         body: {
             dataStream: 'Title\r\n',
             paragraphs: [{ paragraphId: 'para_docs_ui_menu_style_fixture_1', startIndex: 5 }],
@@ -112,7 +116,7 @@ function createStyleTestBed(textStyle?: ITextStyle) {
             textStyle,
         },
     }));
-    univerInstanceService.setCurrentUnitForType('doc-menu-style');
+    univerInstanceService.setCurrentUnitForType(unitId);
 
     return {
         injector,
@@ -176,6 +180,26 @@ describe('DocMenuStyleService', () => {
 
         expect(service.getDefaultStyle()).toEqual({ ff: 'Arial', fs: 20, cl: { rgb: '#f05252' } });
     });
+
+    it.each([DOCS_NORMAL_EDITOR_UNIT_ID_KEY, DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY])(
+        'gives the sheet editor %s no default text colour, neither the theme one nor its document one',
+        (unitId) => {
+            const plain = createStyleTestBed(undefined, unitId);
+            plain.renderManagerService.editArea = DocumentEditArea.BODY;
+            expect(plain.service.getDefaultStyle()).toEqual({ ff: 'Arial', fs: 11 });
+
+            // ^ a cell's own colour reaches the editor as its document style; the rest of that style stays
+            const styled = createStyleTestBed({ fs: 20, bl: 1, cl: { rgb: '#f05252' } }, unitId);
+            expect(styled.service.getDefaultStyle()).toEqual({ ff: 'Arial', fs: 20, bl: 1 });
+            styled.renderManagerService.editArea = DocumentEditArea.BODY;
+            expect(styled.service.getDefaultStyle()).toEqual({ ff: 'Arial', fs: 20, bl: 1 });
+
+            // ^ a document keeps the theme colour and its own colour
+            expect(createStyleTestBed().service.getDefaultStyle()).toEqual({ ff: 'Arial', fs: 11, cl: { rgb: '#1B1C1F' } });
+            expect(createStyleTestBed({ cl: { rgb: '#f05252' } }).service.getDefaultStyle())
+                .toEqual({ ff: 'Arial', fs: 11, cl: { rgb: '#f05252' } });
+        }
+    );
 
     it('clears cached input style when document selection changes', () => {
         const { service, selectionManager, commandService } = createStyleTestBed();

@@ -14,10 +14,14 @@
  * limitations under the License.
  */
 
-import { CustomRangeType, ICommandService, Tools } from '@univerjs/core';
+// Modified by Carenode, 2026 — a sheet cell editor and the formula bar give typed text no default colour (xlsxkit cell-editor-no-default-colour)
+
+import type { IDocumentStyle } from '@univerjs/core';
+import { CustomRangeType, DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY, DOCS_NORMAL_EDITOR_UNIT_ID_KEY, ICommandService, Tools } from '@univerjs/core';
 import { RichTextEditingMutation } from '@univerjs/docs';
 import { describe, expect, it } from 'vitest';
 import { DocIMEInputManagerService } from '../../../services/doc-ime-input-manager.service';
+import { DocMenuStyleService } from '../../../services/doc-menu-style.service';
 import { IMEInputCommand } from '../ime-input.command';
 import { createCommandTestBed } from './create-command-test-bed';
 
@@ -127,6 +131,82 @@ describe('IME selection typing style', () => {
             }
         } finally {
             bed.univer.dispose();
+        }
+    });
+});
+
+describe('IME input colour in a sheet cell editor', () => {
+    const THEME_TEXT_COLOUR = { rgb: '#1B1C1F' };
+    const RED = { rgb: '#ff0000' };
+    const BLUE = { rgb: '#0000ff' };
+
+    function createEditorBed(unitId: string, text: string, textRuns: { st: number; ed: number; ts: { cl: { rgb: string } } }[] = [], documentStyle: IDocumentStyle = {}) {
+        const bed = createCommandTestBed({
+            id: unitId,
+            documentStyle,
+            body: {
+                dataStream: `${text}\r\n`,
+                paragraphs: [{ paragraphId: 'paragraph', startIndex: text.length }],
+                textRuns,
+            },
+        });
+        const commands = bed.get(ICommandService);
+        commands.registerCommand(IMEInputCommand);
+        commands.registerCommand(RichTextEditingMutation);
+        return { bed, commands, ime: bed.get(DocIMEInputManagerService) };
+    }
+
+    /** One composition at `offset`: each step replaces the text the step before it composed. */
+    async function compose(editor: ReturnType<typeof createEditorBed>, offset: number, steps: string[]) {
+        editor.ime.setActiveRange({ startOffset: offset, endOffset: offset, collapsed: true, segmentId: '' });
+        for (const [index, newText] of steps.entries()) {
+            expect(await editor.commands.executeCommand(IMEInputCommand.id, {
+                unitId: editor.bed.doc.getUnitId(),
+                newText,
+                oldTextLen: index === 0 ? 0 : steps[index - 1].length,
+                isCompositionStart: index === 0,
+                isCompositionEnd: index === steps.length - 1,
+            })).toBe(true);
+        }
+    }
+
+    function colourAt(editor: ReturnType<typeof createEditorBed>, offset: number) {
+        return editor.bed.doc.getBody()?.textRuns?.find((run) => run.st <= offset && run.ed > offset)?.ts?.cl;
+    }
+
+    // ^ the formula bar's document carries the theme colour as its text style (sheets-ui data-sync sets it)
+    it.each([
+        { unitId: DOCS_NORMAL_EDITOR_UNIT_ID_KEY, documentStyle: {}, expected: undefined },
+        { unitId: DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY, documentStyle: { textStyle: { cl: THEME_TEXT_COLOUR } }, expected: undefined },
+        { unitId: 'ime-document', documentStyle: {}, expected: THEME_TEXT_COLOUR },
+    ])('composes Hangul after the text of $unitId with colour $expected.rgb', async ({ unitId, documentStyle, expected }) => {
+        const editor = createEditorBed(unitId, '고정 열 12', [], documentStyle);
+        try {
+            await compose(editor, 7, ['ㄱ', '가', '간']);
+            expect(editor.bed.doc.getBody()?.dataStream).toBe('고정 열 12간\r\n');
+            expect(colourAt(editor, 7)).toEqual(expected);
+        } finally {
+            editor.bed.univer.dispose();
+        }
+    });
+
+    it('keeps the colour of the text it continues and a colour picked while editing, and adds none of its own', async () => {
+        const editor = createEditorBed(DOCS_NORMAL_EDITOR_UNIT_ID_KEY, 'ab', [{ st: 0, ed: 1, ts: { cl: RED } }]);
+        try {
+            await compose(editor, 1, ['가']);
+            expect(editor.bed.doc.getBody()?.dataStream).toBe('a가b\r\n');
+            expect(colourAt(editor, 1)).toEqual(RED);
+
+            await compose(editor, 3, ['나']);
+            expect(editor.bed.doc.getBody()?.dataStream).toBe('a가b나\r\n');
+            expect(colourAt(editor, 3)).toBeUndefined();
+
+            editor.bed.get(DocMenuStyleService).setStyleCache({ cl: BLUE });
+            await compose(editor, 4, ['다']);
+            expect(editor.bed.doc.getBody()?.dataStream).toBe('a가b나다\r\n');
+            expect(colourAt(editor, 4)).toEqual(BLUE);
+        } finally {
+            editor.bed.univer.dispose();
         }
     });
 });

@@ -14,11 +14,15 @@
  * limitations under the License.
  */
 
-import type { DocumentDataModel, ICommand, IDocumentData, Injector } from '@univerjs/core';
+// Modified by Carenode, 2026 — a sheet cell editor and the formula bar give typed text no default colour (xlsxkit cell-editor-no-default-colour)
+
+import type { DocumentDataModel, ICommand, IDocumentData, IDocumentStyle, Injector } from '@univerjs/core';
 import {
     awaitTime,
     CustomRangeType,
     DataStreamTreeTokenType,
+    DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY,
+    DOCS_NORMAL_EDITOR_UNIT_ID_KEY,
     DocumentBlockRangeType,
     DocumentFlavor,
     ICommandService,
@@ -505,3 +509,35 @@ it.each([
         }
     }
 );
+
+// ^ Alt+Enter in a cell (sheets-ui `EditorBreakLineShortcut`) and the phone formula bar's line break both run this
+//   command; the formula bar's document carries the theme colour as its text style (sheets-ui data-sync sets it)
+it.each([
+    { unitId: DOCS_NORMAL_EDITOR_UNIT_ID_KEY, documentStyle: {}, expected: [] },
+    { unitId: DOCS_FORMULA_BAR_EDITOR_UNIT_ID_KEY, documentStyle: { textStyle: { cl: { rgb: '#1B1C1F' } } }, expected: [] },
+    { unitId: 'break-line-document', documentStyle: {}, expected: [{ rgb: '#1B1C1F' }] },
+])('breaks a line in $unitId with the run colours $expected', ({ unitId, documentStyle, expected }: { unitId: string; documentStyle: IDocumentStyle; expected: unknown[] }) => {
+    const univer = new Univer();
+    const injector = univer.__getInjector();
+    injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
+    univer.registerPlugin(UniverDocsPlugin);
+    injector.add([DocMenuStyleService]);
+    const model = univer.createUnit<IDocumentData, DocumentDataModel>(UniverInstanceType.UNIVER_DOC, {
+        id: unitId,
+        documentStyle,
+        body: { dataStream: 'ab\r\n', paragraphs: [{ paragraphId: 'paragraph', startIndex: 2 }], textRuns: [] },
+    });
+    try {
+        injector.get(IUniverInstanceService).focusUnit(model.getUnitId());
+        const commands = injector.get(ICommandService);
+        commands.registerCommand(BreakLineCommand);
+        const selections = injector.get(DocSelectionManagerService);
+        selections.__TEST_ONLY_setCurrentSelection({ unitId, subUnitId: unitId });
+        selections.__TEST_ONLY_add([{ startOffset: 2, endOffset: 2, collapsed: true, isActive: true }]);
+        expect(commands.syncExecuteCommand(BreakLineCommand.id)).toBe(true);
+        expect(model.getBody()?.dataStream).toBe('ab\r\r\n');
+        expect((model.getBody()?.textRuns ?? []).flatMap((run) => (run.ts?.cl ? [run.ts.cl] : []))).toEqual(expected);
+    } finally {
+        univer.dispose();
+    }
+});

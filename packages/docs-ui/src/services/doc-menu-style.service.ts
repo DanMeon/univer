@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — a sheet cell editor and the formula bar give typed text no default colour (xlsxkit cell-editor-no-default-colour)
+
 import type { DocumentDataModel, ICommand, ITextStyle, Nullable } from '@univerjs/core';
-import { CommandType, Disposable, Inject, IUniverInstanceService, ThemeService, UniverInstanceType } from '@univerjs/core';
+import { CommandType, Disposable, Inject, IUniverInstanceService, SHEET_EDITOR_UNITS, ThemeService, UniverInstanceType } from '@univerjs/core';
 import { DocSelectionManagerService, DocSkeletonManagerService } from '@univerjs/docs';
 import { DocumentEditArea, IRenderManagerService } from '@univerjs/engine-render';
 
@@ -85,10 +87,20 @@ export class DocMenuStyleService extends Disposable {
             };
         }
 
-        const documentDefaultTextStyle = {
+        const documentDefaultTextStyle: ITextStyle = {
             ...defaultTextStyle,
             ...docDataModel.getDocumentStyle().textStyle,
         };
+
+        // A sheet cell editor and the formula bar write no colour of their own into typed text, as in 0.24: the
+        // colour comes from the cell's format (the editor renders with its document style and the cell keeps its
+        // style), from the run the text continues, or from a colour picked while editing (the style cache). A
+        // concrete colour here — the theme's, or the formula bar's document colour, which is the theme's too —
+        // goes into every new run (typing, IME, line break), so one appended character turned a plain cell into
+        // rich text and a cell typed over got the colour in its style.
+        if (SHEET_EDITOR_UNITS.includes(docDataModel.getUnitId())) {
+            delete documentDefaultTextStyle.cl;
+        }
 
         const unitId = docDataModel?.getUnitId();
         const docSkeletonManagerService = this._renderManagerService.getRenderUnitById(unitId)?.with(DocSkeletonManagerService);
