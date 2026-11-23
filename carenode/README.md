@@ -14,8 +14,10 @@ Carenode repository at `apps/xlsxkit/docs/univer-fork.md`.
   are otherwise untouched, so the branch rebases onto the next upstream tag with few conflicts. A changed source file
   carries a `Modified by Carenode, <year> — <what>` header line.
 - Tag `v<upstream>-carenode.<N>` releases version `<upstream>-carenode.<N>`. `N = 0` is the upstream source with no
-  fix (the comparison baseline and the first publication of the package names); each release with fixes raises `N`.
-  The version is a prerelease, so it never satisfies a `^<upstream>` range: consumers pin the exact version.
+  fix, the comparison baseline: it is kept as the tag and the `univer-<version>` artifact of the tag's workflow run,
+  and is not published (only `1.5.2-carenode.0` was, by hand, to create the package names on npm). Each release with
+  fixes raises `N`. The version is a prerelease, so it never satisfies a `^<upstream>` range: consumers pin the exact
+  version.
 - Packages are published as `@danmeon/univer-<x>` for upstream `@univerjs/<x>`. Inside them, a dependency on another
   forked package keeps its upstream key as an alias: `"@univerjs/core": "npm:@danmeon/univer-core@1.5.2-carenode.1"`.
 
@@ -36,19 +38,24 @@ Pushing a `v*-carenode.*` tag runs, on the runner and toolchain of upstream's `r
    the changed source files, tests excluded since they are not packed), `pack-packages.mts`, `check-packs.mts`, and
    layer 2 — compare with the official tarballs, allowing only the differences listed at the top of
    `compare-official.mts`;
-3. for `N >= 1`, previous release — `compare-previous.mts` downloads `<base>-carenode.<N-1>` from npm and compares
-   the build with it file by file: besides the version, chunk names and the README notice, built code may differ
-   only in the modules (and declaration files) of source files changed since tag `v<base>-carenode.<N-1>`; derived
-   files (import and export blocks, the UMD bundle, the Tailwind CSS) may differ only in such a package, and the
-   declaration of an unchanged file only where its inferred type names another import and one of the two comes from
-   a changed file. Anything else fails the run. The previous release must be public;
+3. for `N >= 1`, previous release — `compare-previous.mts` compares the build file by file with the previous release
+   `<base>-carenode.<N-1>`: besides the version, chunk names and the README notice, built code may differ only in the
+   modules (and declaration files) of source files changed since tag `v<base>-carenode.<N-1>`; derived files (import
+   and export blocks, the UMD bundle, the Tailwind CSS) may differ only in such a package, and the declaration of an
+   unchanged file only where its inferred type names another import and one of the two comes from a changed file.
+   Anything else fails the run. For `N >= 2` the previous release is downloaded from npm (`--download`) and must be
+   public. For `N = 1` it is the unpublished baseline `<base>-carenode.0`: the job takes the `univer-<base>-carenode.0`
+   artifact of the latest successful run of this workflow on tag `v<base>-carenode.0` at the tag's commit (the tag
+   push, or a manual run on the tag ref), checks its `SHA256SUMS` and compares with it (`--previous <dir>` without
+   `--download`). With no such run or artifact (artifacts expire after 90 days) the job fails;
+   `gh workflow run carenode-release.yml --ref v<base>-carenode.0 -f version=<base>-carenode.0` builds it again;
 4. for `N >= 1`, once steps 1 to 3 pass, stage the tarballs on npm through trusted publishing (`publish.sh stage`).
    Nothing is public until a maintainer approves the staged versions with 2FA. `N = 0` only leaves the tarballs as
-   the run's `univer-<version>` artifact.
+   the run's `univer-<version>` artifact, the baseline that step 3 of `N = 1` compares with.
 
-A manual run (`workflow_dispatch` with a version) does steps 1 to 3 (step 3 for `N >= 1`) and never stages.
-`compare-previous.mts --previous <dir>` without `--download` compares with a downloaded `univer-<version>` artifact
-instead, for a check on a maintainer's machine before the previous release is public.
+A manual run (`workflow_dispatch` with a version) does steps 1 to 3 (step 3 for `N >= 1`) and never stages. On a
+maintainer's machine, `compare-previous.mts --previous <dir>` without `--download` compares with any downloaded
+`univer-<version>` artifact, e.g. before the previous release is public.
 
 ## Publishing by hand
 

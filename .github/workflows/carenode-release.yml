@@ -3,10 +3,13 @@
 # this repository).
 #
 #   push tag v<upstream>-carenode.<N>  build + layer 1/2 comparison + pack check; N >= 1 also compares the build
-#                                      with the previous fork release <N-1> from npm and, when that passes, stages
-#                                      the tarballs on npm (a maintainer approves them with 2FA). N = 0 is the
-#                                      unmodified upstream source and is never published from here.
-#   workflow_dispatch (version input)  the same build and checks for comparison only; never publishes.
+#                                      with the previous fork release <N-1> and, when that passes, stages the
+#                                      tarballs on npm (a maintainer approves them with 2FA). N = 0 is the unmodified
+#                                      upstream source and is never published: N = 1 compares with the tarballs this
+#                                      workflow's run of tag v<upstream>-carenode.0 left as an artifact, N >= 2 with
+#                                      the release on npm.
+#   workflow_dispatch (version input)  the same build and checks for comparison only; never publishes. Run on tag
+#                                      v<upstream>-carenode.0, it builds that baseline artifact again (they expire).
 name: carenode release
 
 on:
@@ -48,6 +51,7 @@ jobs:
             version: ${{ steps.version.outputs.version }}
             base_tag: ${{ steps.version.outputs.base_tag }}
             previous: ${{ steps.version.outputs.previous }}
+            previous_source: ${{ steps.version.outputs.previous_source }}
             publish: ${{ steps.version.outputs.publish }}
         steps:
             - name: Read the fork version
@@ -65,13 +69,20 @@ jobs:
                   fi
                   publish=false
                   if [[ "$EVENT" == push && "${BASH_REMATCH[2]}" != 0 ]]; then publish=true; fi
-                  # The fork release this build is compared with before staging (none for N = 0).
+                  # The fork release this build is compared with before staging (none for N = 0), and where its
+                  # tarballs come from: <base>-carenode.0 is never published, so for N = 1 they are the artifact of the
+                  # run of tag v<base>-carenode.0; for N >= 2 they are the release on npm.
                   previous=
-                  if [[ "${BASH_REMATCH[2]}" != 0 ]]; then previous="${BASH_REMATCH[1]}-carenode.$((BASH_REMATCH[2] - 1))"; fi
+                  previous_source=
+                  if [[ "${BASH_REMATCH[2]}" != 0 ]]; then
+                      previous="${BASH_REMATCH[1]}-carenode.$((BASH_REMATCH[2] - 1))"
+                      if [[ "${BASH_REMATCH[2]}" == 1 ]]; then previous_source=artifact; else previous_source=npm; fi
+                  fi
                   {
                       echo "version=$version"
                       echo "base_tag=v${BASH_REMATCH[1]}"
                       echo "previous=$previous"
+                      echo "previous_source=$previous_source"
                       echo "publish=$publish"
                   } >> "$GITHUB_OUTPUT"
                   echo "version $version, base v${BASH_REMATCH[1]}, previous release ${previous:-none}, stage on npm: $publish" >> "$GITHUB_STEP_SUMMARY"
@@ -214,9 +225,14 @@ jobs:
         if: github.repository == 'DanMeon/univer' && needs.meta.outputs.previous != ''
         runs-on: ubuntu-latest
         timeout-minutes: 20
+        # actions: read lets github.token list this workflow's runs and download another run's artifact (N = 1).
+        permissions:
+            contents: read
+            actions: read
         env:
             VERSION: ${{ needs.meta.outputs.version }}
             PREVIOUS: ${{ needs.meta.outputs.previous }}
+            PREVIOUS_SOURCE: ${{ needs.meta.outputs.previous_source }}
         steps:
             - name: Checkout
               uses: actions/checkout@v7
@@ -247,10 +263,42 @@ jobs:
                   name: carenode-layer2-${{ env.VERSION }}
                   path: ${{ env.WORK }}/layer2
 
-            - name: Compare with the previous release on npm
+            # N = 1: the previous release <base>-carenode.0 is not on npm. Take the tarballs from the latest successful
+            # run of this workflow on tag v<base>-carenode.0 at the tag's commit, the tag push or a manual run on the
+            # tag ref (which builds the artifact again once it has expired).
+            - name: Download the previous release from its tag's run (N = 1)
+              if: env.PREVIOUS_SOURCE == 'artifact'
+              env:
+                  GH_TOKEN: ${{ github.token }}
               run: |
+                  tag="v$PREVIOUS"
+                  commit=$(git rev-parse "refs/tags/$tag^{commit}")
+                  rebuild="gh workflow run carenode-release.yml --repo $GITHUB_REPOSITORY --ref $tag -f version=$PREVIOUS"
+                  run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow carenode-release.yml --branch "$tag" \
+                      --status success --limit 100 --json databaseId,event,headSha,createdAt \
+                      | jq -r --arg commit "$commit" '[.[] | select(.headSha == $commit
+                          and (.event == "push" or .event == "workflow_dispatch"))] | sort_by(.createdAt) | last
+                          | .databaseId // empty')
+                  if [[ -z "$run_id" ]]; then
+                      echo "::error::no successful carenode-release.yml run of tag $tag at $commit to take $PREVIOUS from; build it with: $rebuild"
+                      exit 1
+                  fi
+                  if ! gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "univer-$PREVIOUS" --dir "$WORK/previous"; then
+                      echo "::error::run $run_id of tag $tag has no artifact univer-$PREVIOUS (artifacts expire after 90 days); build it again with: $rebuild"
+                      exit 1
+                  fi
+                  (cd "$WORK/previous" && sha256sum --quiet -c SHA256SUMS)
+                  echo "previous release $PREVIOUS: artifact univer-$PREVIOUS of run $run_id" >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Compare with the previous release
+              run: |
+                  case "$PREVIOUS_SOURCE" in
+                      npm) download=(--download) ;;
+                      artifact) download=() ;;
+                      *) echo "::error::unknown previous release source '$PREVIOUS_SOURCE'"; exit 1 ;;
+                  esac
                   node carenode/compare-previous.mts --selection "$WORK/layer2/selection.json" \
-                      --built "$WORK/univer-$VERSION" --version "$VERSION" --previous "$WORK/previous" --download \
+                      --built "$WORK/univer-$VERSION" --version "$VERSION" --previous "$WORK/previous" "${download[@]}" \
                       --report "$WORK/reports/previous.json" | tee "$WORK/reports/previous.txt"
                   tail -n 1 "$WORK/reports/previous.txt" >> "$GITHUB_STEP_SUMMARY"
 
