@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 mobile-reveal-fixed-box: a focused element in a fixed box is not revealed by scrolling what lies around it
+
 import type { RefObject } from 'react';
-import type { IMobileKeyboardViewport } from '../components/config-provider/ConfigProvider';
 import { useCallback, useContext, useLayoutEffect, useReducer, useRef } from 'react';
+import type { IMobileKeyboardViewport } from '../components/config-provider/ConfigProvider';
 import { ConfigContext } from '../components/config-provider/ConfigProvider';
 
 export interface IMobileKeyboardViewportLayout {
@@ -53,11 +55,17 @@ export function revealFocusedElementInMobileViewport(
         return false;
     }
 
+    // ^ a fixed box stays where it is when anything around it scrolls: only a scroll box inside it can move the element
+    //   (the hidden input a text editor keeps at its caret is one, `position: fixed` near the top of the window)
+    if (getComputedStyle(activeElement).position === 'fixed') {
+        return false;
+    }
+
     const margin = 12;
     const targetRect = activeElement.getBoundingClientRect();
     let scrollContainer = activeElement.parentElement;
     while (scrollContainer && scrollContainer !== container) {
-        const overflowY = getComputedStyle(scrollContainer).overflowY;
+        const { overflowY, position } = getComputedStyle(scrollContainer);
         if ((overflowY === 'auto' || overflowY === 'scroll') &&
             scrollContainer.scrollHeight > scrollContainer.clientHeight) {
             const scrollRect = scrollContainer.getBoundingClientRect();
@@ -79,6 +87,9 @@ export function revealFocusedElementInMobileViewport(
                 }
                 break;
             }
+            return false;
+        }
+        if (position === 'fixed') {
             return false;
         }
         scrollContainer = scrollContainer.parentElement;

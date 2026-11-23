@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 mobile-reveal-fixed-box: a focused element in a fixed box is not revealed by scrolling what lies around it
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     resolveMobileKeyboardViewportLayout,
@@ -103,5 +105,63 @@ describe('mobile keyboard viewport', () => {
 
         expect(revealFocusedElementInMobileViewport(container, { top: 0, bottom: 300 })).toBe(true);
         expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' });
+    });
+
+    it('leaves a focused element in a fixed box alone: no scroll around the box can move it', () => {
+        // ^ a sheet cell editor's hidden input: fixed at the caret near the top of the window, inside a page that scrolls
+        const page = document.createElement('main');
+        const host = document.createElement('div');
+        const inputBox = document.createElement('div');
+        const input = document.createElement('div');
+        const scrollIntoView = vi.fn();
+        page.style.overflowY = 'auto';
+        host.style.position = 'fixed';
+        inputBox.style.position = 'absolute';
+        input.contentEditable = 'true';
+        input.tabIndex = -1;
+        input.scrollIntoView = scrollIntoView;
+        inputBox.appendChild(input);
+        host.appendChild(inputBox);
+        page.appendChild(host);
+        document.body.appendChild(page);
+        input.focus();
+        Object.defineProperties(page, {
+            clientHeight: { configurable: true, value: 791 },
+            scrollHeight: { configurable: true, value: 2067 },
+        });
+        page.scrollTop = 45;
+        page.getBoundingClientRect = () => new DOMRect(0, 49, 820, 791);
+        input.getBoundingClientRect = () => new DOMRect(1, 1, 0, 18);
+
+        expect(revealFocusedElementInMobileViewport(document.body, { top: 0, bottom: 840 })).toBe(false);
+        expect(page.scrollTop).toBe(45);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+
+        host.style.position = '';
+        input.style.position = 'fixed';
+        expect(revealFocusedElementInMobileViewport(document.body, { top: 0, bottom: 840 })).toBe(false);
+        expect(page.scrollTop).toBe(45);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it('still scrolls a scroll box inside a fixed box', () => {
+        const dialog = document.createElement('div');
+        const scroller = document.createElement('div');
+        const input = document.createElement('input');
+        dialog.style.position = 'fixed';
+        scroller.style.overflowY = 'auto';
+        scroller.appendChild(input);
+        dialog.appendChild(scroller);
+        document.body.appendChild(dialog);
+        input.focus();
+        Object.defineProperties(scroller, {
+            clientHeight: { configurable: true, value: 200 },
+            scrollHeight: { configurable: true, value: 800 },
+        });
+        scroller.getBoundingClientRect = () => new DOMRect(0, 100, 320, 200);
+        input.getBoundingClientRect = () => new DOMRect(0, 340, 320, 40);
+
+        expect(revealFocusedElementInMobileViewport(document.body, { top: 0, bottom: 300 })).toBe(true);
+        expect(scroller.scrollTop).toBe(92);
     });
 });
