@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — the mobile workbench takes its width, its height and the keyboard overlap from its mount container, not from the window
+
 import type { Injector } from '@univerjs/core';
 import type { IMobileKeyboardViewport } from '@univerjs/design';
 import type { ComponentType } from 'react';
@@ -43,21 +45,31 @@ import { MobileCanvasLayoutProvider } from './MobileCanvasLayout';
 
 const MOBILE_KEYBOARD_THRESHOLD = 80;
 
-export function resolveMobileKeyboardInset(stableHeight: number, visibleBottom: number, baselineInset: number): number {
-    const keyboardInset = Math.max(0, Math.round(stableHeight - visibleBottom) - baselineInset);
+/**
+ * How many CSS pixels of the workbench the on-screen keyboard covers: how far the mount container reaches below the
+ * bottom of the visible viewport (both in layout-viewport coordinates), less the overlap that was there without a
+ * keyboard (`baselineInset`, such as browser chrome over the page). A host that already shrank the container above
+ * the keyboard leaves no overlap. Less than the threshold is not a keyboard.
+ */
+export function resolveMobileKeyboardInset(containerBottom: number, visibleBottom: number, baselineInset: number): number {
+    const keyboardInset = Math.max(0, Math.round(containerBottom - visibleBottom) - baselineInset);
     return keyboardInset >= MOBILE_KEYBOARD_THRESHOLD ? keyboardInset : 0;
 }
 
-export function shouldUpdateMobileStableHeight(
-    stableHeight: number,
-    nextHeight: number,
-    stableWidth: number,
-    nextWidth: number,
-    editing: boolean,
-    keyboardVisible: boolean
-): boolean {
-    return nextWidth !== stableWidth ||
-        (!editing && !keyboardVisible && stableHeight - nextHeight < MOBILE_KEYBOARD_THRESHOLD);
+export interface IMobileWorkbenchBox {
+    /** The height the workbench root takes. */
+    height: number;
+    /** The container's bottom edge in layout-viewport coordinates. */
+    bottom: number;
+}
+
+/**
+ * The box the workbench fills: its mount container as it is now. A container with no height of its own (one that
+ * takes its height from the workbench) gets the window's height, as before.
+ */
+export function resolveMobileWorkbenchBox(rect: Pick<DOMRect, 'top' | 'height'>, windowHeight: number): IMobileWorkbenchBox {
+    const height = rect.height || windowHeight;
+    return { height, bottom: rect.top + height };
 }
 
 export interface IUniverAppProps extends IWorkbenchOptions {
@@ -171,11 +183,13 @@ export function MobileWorkbench(props: IUniverAppProps) {
             return undefined;
         }
 
-        let stableHeight = Math.round(mountContainer.getBoundingClientRect().height || window.innerHeight);
-        let stableWidth = Math.round(mountContainer.getBoundingClientRect().width || window.innerWidth);
-        let baselineInset = Math.max(0, stableHeight - Math.round(
+        // ^ The root is always as tall as the mount container is now, and the keyboard is measured against the
+        //   container's bottom edge. A host may put the container anywhere on the page, size it from the visual
+        //   viewport a frame after the window resized, or change it with no window resize at all (a panel above it).
+        let box = resolveMobileWorkbenchBox(mountContainer.getBoundingClientRect(), window.innerHeight);
+        let baselineInset = Math.max(0, Math.round(box.bottom - (
             visualViewport ? visualViewport.offsetTop + visualViewport.height : window.innerHeight
-        ));
+        )));
         let keyboardVisible = false;
         let initialViewportFrame: number | null = null;
         let revealFrame: number | null = null;
@@ -218,8 +232,8 @@ export function MobileWorkbench(props: IUniverAppProps) {
             const visibleBottom = visualViewport
                 ? visibleTop + visibleHeight
                 : window.innerHeight;
-            const viewportInset = Math.max(0, Math.round(stableHeight - visibleBottom));
-            const keyboardInset = resolveMobileKeyboardInset(stableHeight, visibleBottom, baselineInset);
+            const viewportInset = Math.max(0, Math.round(box.bottom - visibleBottom));
+            const keyboardInset = resolveMobileKeyboardInset(box.bottom, visibleBottom, baselineInset);
             const editing = isEditing();
 
             if (!editing) {
@@ -245,52 +259,43 @@ export function MobileWorkbench(props: IUniverAppProps) {
                     top: Math.round(visibleTop),
                     bottom: Math.round(visibleBottom),
                     height: Math.round(visibleHeight),
-                    stableHeight,
+                    stableHeight: Math.round(box.height),
                 }
                 : null;
             setKeyboardInset(nextKeyboardInset);
             setKeyboardViewport(nextKeyboardViewport);
             scheduleReveal(nextKeyboardViewport);
         };
-        const updateStableViewport = () => {
-            const height = Math.round(mountContainer.getBoundingClientRect().height || window.innerHeight);
-            const width = Math.round(mountContainer.getBoundingClientRect().width || window.innerWidth);
-            const editing = isEditing();
-
-            if (shouldUpdateMobileStableHeight(
-                stableHeight,
-                height,
-                stableWidth,
-                width,
-                editing,
-                keyboardVisible
-            )) {
-                stableHeight = height;
-                stableWidth = width;
-                viewportElement.style.height = `${stableHeight}px`;
-            }
+        const updateViewport = () => {
+            box = resolveMobileWorkbenchBox(mountContainer.getBoundingClientRect(), window.innerHeight);
+            viewportElement.style.height = `${box.height}px`;
             updateKeyboardViewport();
         };
 
-        viewportElement.style.height = `${stableHeight}px`;
+        viewportElement.style.height = `${box.height}px`;
         initialViewportFrame = requestAnimationFrame(() => {
             initialViewportFrame = null;
-            updateKeyboardViewport();
+            updateViewport();
         });
-        window.addEventListener('resize', updateStableViewport);
-        visualViewport?.addEventListener('resize', updateKeyboardViewport);
-        visualViewport?.addEventListener('scroll', updateKeyboardViewport);
-        document.addEventListener('focusin', updateKeyboardViewport);
+        // ^ A container change without a window resize reaches only this observer. The callback runs after layout and
+        //   before paint, so the root never shows a stale height for a frame.
+        const containerObserver = new ResizeObserver(updateViewport);
+        containerObserver.observe(mountContainer);
+        window.addEventListener('resize', updateViewport);
+        visualViewport?.addEventListener('resize', updateViewport);
+        visualViewport?.addEventListener('scroll', updateViewport);
+        document.addEventListener('focusin', updateViewport);
 
         return () => {
             if (initialViewportFrame != null) {
                 cancelAnimationFrame(initialViewportFrame);
             }
             cancelReveal();
-            window.removeEventListener('resize', updateStableViewport);
-            visualViewport?.removeEventListener('resize', updateKeyboardViewport);
-            visualViewport?.removeEventListener('scroll', updateKeyboardViewport);
-            document.removeEventListener('focusin', updateKeyboardViewport);
+            containerObserver.disconnect();
+            window.removeEventListener('resize', updateViewport);
+            visualViewport?.removeEventListener('resize', updateViewport);
+            visualViewport?.removeEventListener('scroll', updateViewport);
+            document.removeEventListener('focusin', updateViewport);
         };
     }, [mountContainer]);
 
@@ -366,7 +371,9 @@ export function MobileWorkbench(props: IUniverAppProps) {
                                               dark:!univer-bg-gray-800
                                             `, borderBottomClassName)}
                                         >
-                                            <header className="univer-w-screen">
+                                            {/* The sheet tab bar spans the container, not the screen: a header as wide as the screen widened this
+                                                grid's only column and the canvas below it past a container narrower than the window. */}
+                                            <header className="univer-min-w-0">
                                                 {header && <ComponentContainer key="header" components={headerComponents} />}
                                             </header>
 
