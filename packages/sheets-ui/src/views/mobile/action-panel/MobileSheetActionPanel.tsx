@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 mobile-edit-cell-visible: the edited cell is scrolled in between the frozen band and what covers the canvas from below, measured in place, in sheet units, once the layout has settled
+
 import type { Worksheet } from '@univerjs/core';
 import type { ISelectionWithStyle } from '@univerjs/sheets';
 import type { IValueOption, MobileDrawerSnap } from '@univerjs/ui';
@@ -32,7 +34,7 @@ import {
 } from '@univerjs/core';
 import { Button, clsx, resetButtonClassName, useMobileKeyboardViewportLayout } from '@univerjs/design';
 import { IEditorService } from '@univerjs/docs-ui';
-import { DeviceInputEventType, IRenderManagerService } from '@univerjs/engine-render';
+import { DeviceInputEventType, IRenderManagerService, SHEET_VIEWPORT_KEY } from '@univerjs/engine-render';
 import { KeyboardIcon, MenuIcon, MoreLeftIcon } from '@univerjs/icons';
 import {
     checkRangesEditablePermission,
@@ -103,6 +105,159 @@ export function getMobileCellRevealOffset(cellTop: number, cellBottom: number, s
 
 export function getMobileCellCenterOffset(cellTop: number, cellBottom: number, safeTop: number, safeBottom: number): number {
     return (cellTop + cellBottom - safeTop - safeBottom) / 2;
+}
+
+/** A vertical span in client (layout viewport) coordinates. */
+export interface IMobileVerticalSpan {
+    top: number;
+    bottom: number;
+}
+
+export interface IMobileCellRevealAreaInput {
+    /** The sheet canvas. */
+    canvas: IMobileVerticalSpan;
+    /** Where the main viewport starts below the column header and the frozen rows, in canvas pixels. */
+    mainViewportTop: number;
+    /** What cuts the canvas off: its clipping ancestors (the host's box among them) and the visible part of the window. */
+    clips: IMobileVerticalSpan[];
+    /** The top edges of what lies over the canvas from below: the input bar, an open tools panel. */
+    coverTops: number[];
+}
+
+/**
+ * Where the rows of the main viewport can be seen: below the column header and the frozen rows, above the highest of
+ * the canvas bottom, the clipping box bottom, the visible window bottom and what covers the canvas from below. A cover
+ * that starts at or above that top (an input bar opened full screen) hides the whole area and does not bound it.
+ */
+export function resolveMobileCellRevealArea(input: IMobileCellRevealAreaInput): IMobileVerticalSpan {
+    let top = input.canvas.top + input.mainViewportTop;
+    let bottom = input.canvas.bottom;
+    for (const clip of input.clips) {
+        top = Math.max(top, clip.top);
+        bottom = Math.min(bottom, clip.bottom);
+    }
+    for (const coverTop of input.coverTops) {
+        if (coverTop > top) {
+            bottom = Math.min(bottom, coverTop);
+        }
+    }
+    return { top, bottom };
+}
+
+// ^ below half a pixel the cell is where it should be: rounding of the canvas position, not a scroll to make
+const MOBILE_CELL_REVEAL_TOLERANCE = 0.5;
+
+/**
+ * How far, in screen pixels, the sheet must scroll down (negative: up) to bring the whole cell into the area. Nothing
+ * when it is already all inside — the screen does not jump. An area lower than the cell gets the cell's top; an area
+ * with no height shows nothing, and no scroll can change that. Otherwise the cell is centred (`center`, while the
+ * on-screen keyboard is up) or moved just inside, kept off the edge by the safe padding when the area has room for it.
+ */
+export function getMobileCellScrollOffset(cell: IMobileVerticalSpan, area: IMobileVerticalSpan, center: boolean): number {
+    const cellHeight = cell.bottom - cell.top;
+    const areaHeight = area.bottom - area.top;
+    if (areaHeight <= 0) return 0;
+    if (areaHeight < cellHeight) {
+        const offset = cell.top - area.top;
+        return Math.abs(offset) < MOBILE_CELL_REVEAL_TOLERANCE ? 0 : offset;
+    }
+    if (cell.top >= area.top - MOBILE_CELL_REVEAL_TOLERANCE && cell.bottom <= area.bottom + MOBILE_CELL_REVEAL_TOLERANCE) {
+        return 0;
+    }
+    if (center) {
+        return getMobileCellCenterOffset(cell.top, cell.bottom, area.top, area.bottom);
+    }
+    const inset = Math.min(MOBILE_CELL_SAFE_PADDING, (areaHeight - cellHeight) / 2);
+    return getMobileCellRevealOffset(cell.top, cell.bottom, area.top + inset, area.bottom - inset);
+}
+
+// ^ a cap on the wait for a layout that keeps moving (an animation): about half a second at 60 frames a second
+const MOBILE_REVEAL_MAX_SETTLE_FRAMES = 30;
+
+export interface IMobileRevealScheduler {
+    /** A change that may hide the cell: reveal it once the layout has settled. A change while waiting waits again. */
+    schedule(): void;
+    dispose(): void;
+}
+
+export interface IMobileRevealSchedulerOptions {
+    requestFrame: (callback: () => void) => number;
+    cancelFrame: (handle: number) => void;
+    /** Everything the reveal reads, as one comparable value. */
+    readLayout: () => string;
+    reveal: () => void;
+}
+
+/**
+ * Runs `reveal` once, on the first animation frame whose layout is the same as on the frame before. A host can resize
+ * the editor's box a frame after the window, the workbench follows its box after layout and the canvas follows the
+ * workbench, so a reveal on the first frame after a resize measured a layout that was about to change.
+ */
+export function createMobileRevealScheduler(options: IMobileRevealSchedulerOptions): IMobileRevealScheduler {
+    let frame: number | null = null;
+    let previousLayout: string | null = null;
+    let frames = 0;
+
+    const onFrame = () => {
+        frame = null;
+        frames += 1;
+        const layout = options.readLayout();
+        if (layout === previousLayout || frames >= MOBILE_REVEAL_MAX_SETTLE_FRAMES) {
+            previousLayout = null;
+            options.reveal();
+            return;
+        }
+        previousLayout = layout;
+        frame = options.requestFrame(onFrame);
+    };
+
+    return {
+        schedule() {
+            previousLayout = null;
+            if (frame != null) {
+                return;
+            }
+            frames = 0;
+            frame = options.requestFrame(onFrame);
+        },
+        dispose() {
+            if (frame != null) {
+                options.cancelFrame(frame);
+                frame = null;
+            }
+        },
+    };
+}
+
+interface IMobileRevealMeasure {
+    canvasTop: number;
+    /** The main viewport's scroll, in sheet units: a scroll moves the cell with no change of the area. */
+    scrollY: number;
+    area: IMobileVerticalSpan;
+}
+
+function getMobileRevealLayoutKey(measured: IMobileRevealMeasure | null): string {
+    return measured
+        ? `${measured.canvasTop},${measured.scrollY},${measured.area.top},${measured.area.bottom}`
+        : '';
+}
+
+const MOBILE_CLIPPING_OVERFLOW = new Set(['hidden', 'clip', 'auto', 'scroll']);
+
+/** The canvas's clipping ancestors below the body and the visible part of the window, in client coordinates. */
+function getMobileCanvasClips(canvas: HTMLElement): IMobileVerticalSpan[] {
+    const clips: IMobileVerticalSpan[] = [];
+    for (let element = canvas.parentElement; element && element !== document.body; element = element.parentElement) {
+        if (MOBILE_CLIPPING_OVERFLOW.has(getComputedStyle(element).overflowY)) {
+            const rect = element.getBoundingClientRect();
+            clips.push({ top: rect.top, bottom: rect.bottom });
+        }
+    }
+    const visualViewport = window.visualViewport;
+    clips.push(visualViewport
+        ? { top: visualViewport.offsetTop, bottom: visualViewport.offsetTop + visualViewport.height }
+        : { top: 0, bottom: window.innerHeight });
+    return clips;
 }
 
 export function getMobileEditingMenuBottomOffset(formulaOperatorsVisible: boolean): number {
@@ -227,6 +382,7 @@ function MobileSheetActionPanelContent() {
     const injector = useDependency(Injector);
     const permissionService = useDependency(IPermissionService);
     const rangeProtectionRuleModel = useDependency(RangeProtectionRuleModel);
+    const renderManagerService = useDependency(IRenderManagerService);
     const config = useConfigValue<IUniverSheetsUIConfig>(SHEETS_UI_PLUGIN_CONFIG_KEY);
     const editingDisabled = useObservable(
         () => merge(
@@ -258,12 +414,6 @@ function MobileSheetActionPanelContent() {
         false,
         false,
         [editorBridgeService]
-    );
-    const keyboardVisible = useObservable(
-        () => contextService.subscribeContextValue$(MOBILE_KEYBOARD_VISIBLE).pipe(map(Boolean)),
-        Boolean(contextService.getContextValue(MOBILE_KEYBOARD_VISIBLE)),
-        false,
-        [contextService]
     );
     const formulaOperatorsVisible = useObservable(
         () => contextService.subscribeContextValue$(MOBILE_FORMULA_OPERATORS_VISIBLE).pipe(map(Boolean)),
@@ -311,23 +461,61 @@ function MobileSheetActionPanelContent() {
     const handleDataNavigation = useMemo(() => createNavigationHandler('data'), [createNavigationHandler]);
     const handleOperationNavigation = useMemo(() => createNavigationHandler('operation'), [createNavigationHandler]);
 
-    const ensureActiveCellVisible = useCallback(async (safeBottom: number, center = false) => {
+    /**
+     * The canvas top, the main viewport's scroll and where its rows can be seen now, all measured in place; nothing
+     * when the sheet is not rendered. `cover` is an open tools panel.
+     */
+    const measureRevealArea = useCallback((cover: HTMLElement | null): IMobileRevealMeasure | null => {
+        const unitId = workbook?.getUnitId();
+        const renderUnit = unitId ? renderManagerService.getRenderUnitById(unitId) : null;
+        const canvas = renderUnit?.engine.getCanvasElement();
+        const viewMain = renderUnit?.scene.getViewport(SHEET_VIEWPORT_KEY.VIEW_MAIN);
+        if (!canvas || !viewMain) return null;
+
+        const coverTops: number[] = [];
+        const inputBar = canvas.closest('[data-u-comp="app-layout"]')?.querySelector('[data-u-comp="mobile-formula-bar"]');
+        if (inputBar) {
+            // ^ the formula operators sit on top of the input bar, outside its box
+            const operatorBar = contextService.getContextValue(MOBILE_FORMULA_OPERATORS_VISIBLE) ? MOBILE_FORMULA_OPERATOR_BAR_HEIGHT : 0;
+            coverTops.push(inputBar.getBoundingClientRect().top - operatorBar);
+        }
+        if (cover) {
+            coverTops.push(cover.getBoundingClientRect().top);
+        }
+        const canvasRect = canvas.getBoundingClientRect();
+        return {
+            canvasTop: canvasRect.top,
+            scrollY: viewMain.viewportScrollY,
+            area: resolveMobileCellRevealArea({
+                canvas: { top: canvasRect.top, bottom: canvasRect.bottom },
+                mainViewportTop: viewMain.top,
+                clips: getMobileCanvasClips(canvas),
+                coverTops,
+            }),
+        };
+    }, [contextService, renderManagerService, workbook]);
+
+    const ensureActiveCellVisible = useCallback(async (cover: HTMLElement | null) => {
         editorBridgeService.refreshEditCellPosition(false);
         const state = editorBridgeService.getEditCellState();
         const selectionRange = selectionManagerService.getCurrentLastSelection()?.range;
         if (!state && !selectionRange) return;
 
         if (state) {
-            const cellTop = state.canvasOffset.top + state.position.startY;
-            const cellBottom = state.canvasOffset.top + state.position.endY;
-            const safeTop = state.canvasOffset.top + MOBILE_CELL_SAFE_PADDING;
-            const targetBottom = safeBottom - MOBILE_CELL_SAFE_PADDING;
-            const offsetY = center
-                ? getMobileCellCenterOffset(cellTop, cellBottom, safeTop, targetBottom)
-                : getMobileCellRevealOffset(cellTop, cellBottom, safeTop, targetBottom);
+            const freeze = workbook?.getSheetBySheetId(state.sheetId)?.getFreeze();
+            // ^ a cell in the frozen rows stays where it is when the sheet scrolls
+            if (freeze && freeze.ySplit > 0 && state.row < freeze.startRow) return;
+            const measured = measureRevealArea(cover);
+            if (!measured) return;
+            const offsetY = getMobileCellScrollOffset(
+                { top: measured.canvasTop + state.position.startY, bottom: measured.canvasTop + state.position.endY },
+                measured.area,
+                Boolean(contextService.getContextValue(MOBILE_KEYBOARD_VISIBLE))
+            );
             if (offsetY === 0) return;
 
-            await commandService.executeCommand(SetScrollRelativeCommand.id, { offsetY });
+            // ^ the offset is in screen pixels and the scroll is in sheet units, which the zoom scales
+            await commandService.executeCommand(SetScrollRelativeCommand.id, { offsetY: offsetY / state.scaleY });
             editorBridgeService.refreshEditCellPosition(false);
             return;
         }
@@ -343,44 +531,53 @@ function MobileSheetActionPanelContent() {
             offsetY: 0,
         });
         editorBridgeService.refreshEditCellPosition(false);
-    }, [commandService, editorBridgeService, selectionManagerService, workbook]);
+    }, [commandService, contextService, editorBridgeService, measureRevealArea, selectionManagerService, workbook]);
 
     useEffect(() => {
         if (!editing) return undefined;
 
+        // ^ one scheduler for every change of what can be seen, so changes that arrive together end in one scroll
+        const scheduler = createMobileRevealScheduler({
+            requestFrame: (callback) => requestAnimationFrame(callback),
+            cancelFrame: (handle) => cancelAnimationFrame(handle),
+            readLayout: () => getMobileRevealLayoutKey(measureRevealArea(null)),
+            reveal: () => {
+                ensureActiveCellVisible(null).catch(() => undefined);
+            },
+        });
+        const schedule = () => scheduler.schedule();
+        schedule();
+        // ^ the canvas follows the host's box, which can change with no window resize (a host panel above the editor)
+        const unitId = workbook?.getUnitId();
+        const canvas = unitId ? renderManagerService.getRenderUnitById(unitId)?.engine.getCanvasElement() : undefined;
+        const canvasObserver = canvas && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
+        if (canvas) canvasObserver?.observe(canvas);
         const visualViewport = window.visualViewport;
-        let frame = 0;
-        const revealEditingCell = () => {
-            cancelAnimationFrame(frame);
-            frame = requestAnimationFrame(() => {
-                const visibleBottom = visualViewport
-                    ? visualViewport.offsetTop + visualViewport.height
-                    : window.innerHeight;
-                ensureActiveCellVisible(visibleBottom - 48, keyboardVisible).catch(() => undefined);
-            });
-        };
-        revealEditingCell();
-        visualViewport?.addEventListener('resize', revealEditingCell);
-        const selectionSubscription = selectionManagerService.selectionMoveEnd$.subscribe(revealEditingCell);
+        visualViewport?.addEventListener('resize', schedule);
+        const selectionSubscription = selectionManagerService.selectionMoveEnd$.subscribe(schedule);
 
         return () => {
-            cancelAnimationFrame(frame);
-            visualViewport?.removeEventListener('resize', revealEditingCell);
+            scheduler.dispose();
+            canvasObserver?.disconnect();
+            visualViewport?.removeEventListener('resize', schedule);
             selectionSubscription.unsubscribe();
         };
-    }, [editing, ensureActiveCellVisible, keyboardVisible, selectionManagerService]);
+    }, [editing, ensureActiveCellVisible, measureRevealArea, renderManagerService, selectionManagerService, workbook]);
 
     useEffect(() => {
         if (!toolsOpen || drawerSnap === 'expanded') return undefined;
 
-        const frame = requestAnimationFrame(() => {
-            const panelTop = panelRef.current?.getBoundingClientRect().top;
-            if (panelTop != null) {
-                ensureActiveCellVisible(panelTop).catch(() => undefined);
-            }
+        const scheduler = createMobileRevealScheduler({
+            requestFrame: (callback) => requestAnimationFrame(callback),
+            cancelFrame: (handle) => cancelAnimationFrame(handle),
+            readLayout: () => getMobileRevealLayoutKey(measureRevealArea(panelRef.current)),
+            reveal: () => {
+                ensureActiveCellVisible(panelRef.current).catch(() => undefined);
+            },
         });
-        return () => cancelAnimationFrame(frame);
-    }, [drawerSnap, ensureActiveCellVisible, toolsOpen]);
+        scheduler.schedule();
+        return () => scheduler.dispose();
+    }, [drawerSnap, ensureActiveCellVisible, measureRevealArea, toolsOpen]);
 
     useEffect(() => {
         if (contentRef.current) contentRef.current.scrollTop = 0;

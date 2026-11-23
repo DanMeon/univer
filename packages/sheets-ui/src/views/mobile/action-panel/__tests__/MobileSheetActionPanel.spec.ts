@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 mobile-edit-cell-visible: the reveal area, the scroll offset, the settle scheduler and the reveal of the edited cell in sheet units
+
 import type { IWorkbookData, Workbook } from '@univerjs/core';
 import type { IMenuSchema } from '@univerjs/ui';
 import type { Root } from 'react-dom/client';
@@ -57,15 +59,20 @@ import { createRoot } from 'react-dom/client';
 import { BehaviorSubject, EMPTY } from 'rxjs';
 import { describe, expect, it, vi } from 'vitest';
 import type { MobileNumberFormatItem } from '../MobileStylePanel';
+import { SetScrollRelativeCommand } from '../../../../commands/commands/set-scroll.command';
 import { SetCellEditVisibleOperation } from '../../../../commands/operations/cell-edit.operation';
+import { MOBILE_KEYBOARD_VISIBLE } from '../../../../consts/mobile-context';
 import enUS from '../../../../locale/en-US';
 import { IEditorBridgeService } from '../../../../services/editor-bridge.service';
 import {
+    createMobileRevealScheduler,
     getMobileCellCenterOffset,
     getMobileCellRevealOffset,
+    getMobileCellScrollOffset,
     getMobileMenuCommand,
     MobileSheetActionPanel,
     normalizeMobileSelectionPrimary,
+    resolveMobileCellRevealArea,
 } from '../MobileSheetActionPanel';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { configurable: true, value: true, writable: true });
@@ -115,7 +122,12 @@ function createNumberFormatRibbon(): IMenuSchema[] {
     }];
 }
 
-async function renderMobileSheetActionPanel(ribbon: IMenuSchema[] = []) {
+interface IPanelServiceOverrides {
+    editorBridge?: IEditorBridgeService;
+    renderManager?: IRenderManagerService;
+}
+
+async function renderMobileSheetActionPanel(ribbon: IMenuSchema[] = [], overrides: IPanelServiceOverrides = {}) {
     const univer = new Univer();
     const injector = univer.__getInjector();
     const contextService = injector.get(IContextService);
@@ -129,7 +141,7 @@ async function renderMobileSheetActionPanel(ribbon: IMenuSchema[] = []) {
     );
     injector.get(IUniverInstanceService).focusUnit('mobile-sheet');
     injector.add([IEditorBridgeService, {
-        useValue: {
+        useValue: overrides.editorBridge ?? {
             visible$: new BehaviorSubject({ visible: false }),
             getEditCellState: () => null,
             refreshEditCellPosition: vi.fn(),
@@ -137,7 +149,11 @@ async function renderMobileSheetActionPanel(ribbon: IMenuSchema[] = []) {
     }]);
     injector.add([IEditorService, { useValue: { focus: vi.fn() } as unknown as IEditorService }]);
     injector.add([ILayoutService, { useValue: { focus: vi.fn() } as unknown as ILayoutService }]);
-    injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
+    if (overrides.renderManager) {
+        injector.add([IRenderManagerService, { useValue: overrides.renderManager }]);
+    } else {
+        injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
+    }
     injector.add([ComponentManager]);
     injector.add([IconManager]);
     injector.add([IMenuManagerService, {
@@ -177,7 +193,7 @@ async function renderMobileSheetActionPanel(ribbon: IMenuSchema[] = []) {
         ));
     });
 
-    return { commandService: injector.get(ICommandService), container, contextService, permissions, root, subUnitId, univer };
+    return { commandService: injector.get(ICommandService), container, contextService, permissions, root, subUnitId, univer, workbook };
 }
 
 function clickButton(container: HTMLElement, name: string) {
@@ -375,6 +391,319 @@ describe('mobile active-cell reveal offset', () => {
         expect(getMobileCellCenterOffset(100, 140, 80, 500)).toBe(-170);
         expect(getMobileCellCenterOffset(280, 320, 80, 520)).toBe(0);
         expect(getMobileCellCenterOffset(460, 500, 80, 520)).toBe(180);
+    });
+});
+
+describe('mobile edited-cell reveal area', () => {
+    it('starts below the column header and the frozen rows, not at the canvas top', () => {
+        const visibleWindow = { top: 0, bottom: 504 };
+        expect(resolveMobileCellRevealArea({
+            canvas: { top: 190, bottom: 433 },
+            mainViewportTop: 115,
+            clips: [visibleWindow],
+            coverTops: [386],
+        })).toEqual({ top: 305, bottom: 386 });
+        expect(resolveMobileCellRevealArea({
+            canvas: { top: 190, bottom: 433 },
+            mainViewportTop: 25,
+            clips: [visibleWindow],
+            coverTops: [386],
+        })).toEqual({ top: 215, bottom: 386 });
+    });
+
+    it('ends at the host box when the box ends above the visible window', () => {
+        expect(resolveMobileCellRevealArea({
+            canvas: { top: 190, bottom: 773 },
+            mainViewportTop: 25,
+            clips: [{ top: 101, bottom: 434 }, { top: 0, bottom: 504 }],
+            coverTops: [],
+        })).toEqual({ top: 215, bottom: 434 });
+        expect(resolveMobileCellRevealArea({
+            canvas: { top: 190, bottom: 773 },
+            mainViewportTop: 25,
+            clips: [{ top: 101, bottom: 434 }, { top: 0, bottom: 504 }],
+            coverTops: [386],
+        })).toEqual({ top: 215, bottom: 386 });
+    });
+
+    it('starts below the top of the visible window when the window is scrolled past the canvas top', () => {
+        expect(resolveMobileCellRevealArea({
+            canvas: { top: 190, bottom: 773 },
+            mainViewportTop: 25,
+            clips: [{ top: 250, bottom: 600 }],
+            coverTops: [550],
+        })).toEqual({ top: 250, bottom: 550 });
+    });
+
+    it('does not bound the area by a cover that starts above it (an input bar opened full screen)', () => {
+        expect(resolveMobileCellRevealArea({
+            canvas: { top: 190, bottom: 773 },
+            mainViewportTop: 25,
+            clips: [{ top: 0, bottom: 844 }],
+            coverTops: [0],
+        })).toEqual({ top: 215, bottom: 773 });
+    });
+});
+
+describe('mobile edited-cell scroll offset', () => {
+    const area = { top: 305, bottom: 386 };
+
+    it('does not scroll a cell that is already all inside, with or without the keyboard', () => {
+        expect(getMobileCellScrollOffset({ top: 320, bottom: 350 }, area, true)).toBe(0);
+        expect(getMobileCellScrollOffset({ top: 320, bottom: 350 }, area, false)).toBe(0);
+        expect(getMobileCellScrollOffset({ top: 305, bottom: 335 }, area, true)).toBe(0);
+        expect(getMobileCellScrollOffset({ top: 356, bottom: 386.4 }, area, true)).toBe(0);
+    });
+
+    it('centers a hidden cell between the band and the cover while the keyboard is up', () => {
+        expect(getMobileCellScrollOffset({ top: 575, bottom: 605 }, area, true)).toBe(244.5);
+        expect(getMobileCellScrollOffset({ top: 241, bottom: 271 }, area, true)).toBe(-89.5);
+    });
+
+    it('moves a hidden cell just inside, kept off the edge by the safe padding when the area has room', () => {
+        const tall = { top: 215, bottom: 686 };
+        expect(getMobileCellScrollOffset({ top: 700, bottom: 730 }, tall, false)).toBe(92);
+        expect(getMobileCellScrollOffset({ top: 180, bottom: 210 }, tall, false)).toBe(-83);
+        // ^ 81px of area: 25.5px each side, not 48
+        expect(getMobileCellScrollOffset({ top: 400, bottom: 430 }, area, false)).toBe(69.5);
+    });
+
+    it('puts the top of the cell at the area top when the area is lower than the cell', () => {
+        const low = { top: 305, bottom: 325 };
+        expect(getMobileCellScrollOffset({ top: 400, bottom: 430 }, low, true)).toBe(95);
+        expect(getMobileCellScrollOffset({ top: 250, bottom: 280 }, low, false)).toBe(-55);
+        expect(getMobileCellScrollOffset({ top: 305.2, bottom: 335.2 }, low, true)).toBe(0);
+    });
+
+    it('leaves an area with no height alone', () => {
+        expect(getMobileCellScrollOffset({ top: 575, bottom: 605 }, { top: 386, bottom: 386 }, true)).toBe(0);
+        expect(getMobileCellScrollOffset({ top: 575, bottom: 605 }, { top: 386, bottom: 300 }, false)).toBe(0);
+    });
+});
+
+function createFrames() {
+    const queue = new Map<number, () => void>();
+    let next = 1;
+    return {
+        requestFrame: (callback: () => void) => {
+            const handle = next++;
+            queue.set(handle, callback);
+            return handle;
+        },
+        cancelFrame: (handle: number) => {
+            queue.delete(handle);
+        },
+        run() {
+            const callbacks = [...queue.values()];
+            queue.clear();
+            callbacks.forEach((callback) => callback());
+        },
+        get pending() {
+            return queue.size;
+        },
+    };
+}
+
+describe('mobile reveal scheduler', () => {
+    it('reveals once, on the first frame whose layout is the one of the frame before', () => {
+        const frames = createFrames();
+        const layouts = ['window shorter', 'box shorter', 'box shorter'];
+        const reveal = vi.fn();
+        const scheduler = createMobileRevealScheduler({ ...frames, readLayout: () => layouts.shift() ?? 'box shorter', reveal });
+
+        scheduler.schedule();
+        frames.run();
+        frames.run();
+        expect(reveal).not.toHaveBeenCalled();
+        frames.run();
+        expect(reveal).toHaveBeenCalledTimes(1);
+        expect(frames.pending).toBe(0);
+    });
+
+    it('waits again when a change arrives while it waits, and still reveals once', () => {
+        const frames = createFrames();
+        const reveal = vi.fn();
+        const scheduler = createMobileRevealScheduler({ ...frames, readLayout: () => 'same', reveal });
+
+        scheduler.schedule();
+        scheduler.schedule();
+        expect(frames.pending).toBe(1);
+        frames.run();
+        scheduler.schedule();
+        frames.run();
+        expect(reveal).not.toHaveBeenCalled();
+        frames.run();
+        expect(reveal).toHaveBeenCalledTimes(1);
+        expect(frames.pending).toBe(0);
+    });
+
+    it('reveals after a capped wait when the layout keeps moving', () => {
+        const frames = createFrames();
+        let frame = 0;
+        const reveal = vi.fn();
+        const scheduler = createMobileRevealScheduler({ ...frames, readLayout: () => String(frame++), reveal });
+
+        scheduler.schedule();
+        for (let i = 0; i < 29; i++) frames.run();
+        expect(reveal).not.toHaveBeenCalled();
+        frames.run();
+        expect(reveal).toHaveBeenCalledTimes(1);
+        expect(frames.pending).toBe(0);
+    });
+
+    it('drops a pending reveal when disposed', () => {
+        const frames = createFrames();
+        const reveal = vi.fn();
+        const scheduler = createMobileRevealScheduler({ ...frames, readLayout: () => 'same', reveal });
+
+        scheduler.schedule();
+        frames.run();
+        scheduler.dispose();
+        expect(frames.pending).toBe(0);
+        expect(reveal).not.toHaveBeenCalled();
+    });
+});
+
+interface IRevealScreen {
+    canvas: { top: number; bottom: number };
+    inputBarTop: number;
+}
+
+async function renderEditingPanel(options: { row: number; startY: number; endY: number; screen: IRevealScreen }) {
+    const frames = createFrames();
+    vi.stubGlobal('requestAnimationFrame', frames.requestFrame);
+    vi.stubGlobal('cancelAnimationFrame', frames.cancelFrame);
+
+    const screen = options.screen;
+    const appLayout = document.createElement('div');
+    appLayout.setAttribute('data-u-comp', 'app-layout');
+    const canvas = document.createElement('canvas');
+    canvas.getBoundingClientRect = () => ({ top: screen.canvas.top, bottom: screen.canvas.bottom } as DOMRect);
+    const inputBar = document.createElement('div');
+    inputBar.setAttribute('data-u-comp', 'mobile-formula-bar');
+    inputBar.getBoundingClientRect = () => ({ top: screen.inputBarTop, bottom: screen.inputBarTop + 48 } as DOMRect);
+    appLayout.append(canvas, inputBar);
+    document.body.appendChild(appLayout);
+
+    // ^ the main viewport starts below a 25px column header and three 30px frozen rows (screen pixels)
+    const viewMain = { top: 115, viewportScrollY: 0 };
+    const renderUnit = {
+        engine: { getCanvasElement: () => canvas },
+        scene: { getViewport: () => viewMain },
+    };
+    const state = {
+        unitId: 'mobile-sheet',
+        sheetId: '',
+        row: options.row,
+        column: 0,
+        position: { startX: 46, endX: 146, startY: options.startY, endY: options.endY },
+        canvasOffset: { left: 0, top: screen.canvas.top },
+        scaleX: 1.25,
+        scaleY: 1.25,
+    };
+    const rendered = await renderMobileSheetActionPanel([], {
+        editorBridge: {
+            visible$: new BehaviorSubject({ visible: true }),
+            getEditCellState: () => state,
+            refreshEditCellPosition: vi.fn(),
+        } as unknown as IEditorBridgeService,
+        renderManager: { getRenderUnitById: () => renderUnit } as unknown as IRenderManagerService,
+    });
+    state.sheetId = rendered.subUnitId;
+    const scroll = vi.fn((_accessor: unknown, _params?: { offsetY?: number }) => true);
+    rendered.commandService.registerCommand({ id: SetScrollRelativeCommand.id, type: CommandType.COMMAND, handler: scroll });
+
+    async function settle() {
+        for (let i = 0; i < 40 && frames.pending > 0; i++) {
+            await act(async () => frames.run());
+        }
+        // ^ the scroll command runs after the command service's own awaits
+        await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+    }
+
+    function dispose() {
+        disposeRenderedPanel(rendered.root, rendered.container, rendered.univer);
+        appLayout.remove();
+        vi.unstubAllGlobals();
+    }
+
+    return { ...rendered, frames, screen, scroll, settle, dispose };
+}
+
+describe('mobile edited-cell reveal on the screen', () => {
+    it('scrolls a hidden edited cell in between the frozen band and the input bar, in sheet units', async () => {
+        // ^ the window got shorter: the canvas spans 190..433 and the input bar starts at 386, the cell is at 575..605
+        const panel = await renderEditingPanel({
+            row: 13,
+            startY: 385,
+            endY: 415,
+            screen: { canvas: { top: 190, bottom: 433 }, inputBarTop: 386 },
+        });
+        try {
+            act(() => panel.contextService.setContextValue(MOBILE_KEYBOARD_VISIBLE, true));
+            await panel.settle();
+            expect(panel.scroll).toHaveBeenCalledTimes(1);
+            // ^ 244.5 screen pixels at zoom 1.25: the cell's middle lands in the middle of 305..386
+            expect(panel.scroll.mock.calls[0][1]).toEqual({ offsetY: 195.6 });
+        } finally {
+            panel.dispose();
+        }
+    });
+
+    it('does not scroll when the edited cell is already all inside', async () => {
+        const panel = await renderEditingPanel({
+            row: 6,
+            startY: 130,
+            endY: 160,
+            screen: { canvas: { top: 190, bottom: 433 }, inputBarTop: 386 },
+        });
+        try {
+            act(() => panel.contextService.setContextValue(MOBILE_KEYBOARD_VISIBLE, true));
+            await panel.settle();
+            expect(panel.scroll).not.toHaveBeenCalled();
+        } finally {
+            panel.dispose();
+        }
+    });
+
+    it('leaves a cell in the frozen rows alone', async () => {
+        // ^ the first frozen row, just below the 25px column header: above the main viewport, and no scroll moves it
+        const panel = await renderEditingPanel({
+            row: 0,
+            startY: 25,
+            endY: 55,
+            screen: { canvas: { top: 190, bottom: 433 }, inputBarTop: 386 },
+        });
+        try {
+            panel.workbook.getActiveSheet().getConfig().freeze = { xSplit: 0, ySplit: 4, startRow: 4, startColumn: -1 };
+            await panel.settle();
+            expect(panel.scroll).not.toHaveBeenCalled();
+        } finally {
+            panel.dispose();
+        }
+    });
+
+    it('measures once the layout has stopped moving, and scrolls once', async () => {
+        // ^ the first frame still shows the tall canvas, where the cell is inside; the host shrinks the box after it
+        const panel = await renderEditingPanel({
+            row: 13,
+            startY: 385,
+            endY: 415,
+            screen: { canvas: { top: 190, bottom: 773 }, inputBarTop: 726 },
+        });
+        try {
+            act(() => panel.contextService.setContextValue(MOBILE_KEYBOARD_VISIBLE, true));
+            await act(async () => panel.frames.run());
+            panel.screen.canvas.bottom = 433;
+            panel.screen.inputBarTop = 386;
+            await panel.settle();
+            expect(panel.scroll).toHaveBeenCalledTimes(1);
+            expect(panel.scroll.mock.calls[0][1]).toEqual({ offsetY: 195.6 });
+        } finally {
+            panel.dispose();
+        }
     });
 });
 
