@@ -15,6 +15,7 @@
  */
 
 // Modified by Carenode, 2026 — CNT-5176 mobile-edit-cell-visible: the reveal area, the scroll offset, the settle scheduler and the reveal of the edited cell in sheet units
+// Modified by Carenode, 2026 — CNT-5176 mobile-edit-cell-host-scroll: the host page scroll offset, and the page scrolled once to make room before the sheet scrolls
 
 import type { IWorkbookData, Workbook } from '@univerjs/core';
 import type { IMenuSchema } from '@univerjs/ui';
@@ -69,6 +70,7 @@ import {
     getMobileCellCenterOffset,
     getMobileCellRevealOffset,
     getMobileCellScrollOffset,
+    getMobileHostScrollOffset,
     getMobileMenuCommand,
     MobileSheetActionPanel,
     normalizeMobileSelectionPrimary,
@@ -481,6 +483,38 @@ describe('mobile edited-cell scroll offset', () => {
     });
 });
 
+describe('mobile host page scroll offset', () => {
+    // ^ a tablet with the on-screen keyboard up, the editor's box low in a page below a 49px host header: the band is at
+    //   900 and the input bar is held at 792
+    const moving = { top: 900, bottom: 1638 };
+    const fixed = { top: 49, bottom: 792 };
+
+    it('makes room for the cell and the safe padding when the band reaches below the input bar', () => {
+        expect(getMobileHostScrollOffset({ cellHeight: 30, moving, fixed })).toBe(234);
+        // ^ the customer measurement: the band at 804 over the input bar at 792, a 22px cell
+        expect(getMobileHostScrollOffset({ cellHeight: 22, moving: { top: 804, bottom: 1650 }, fixed })).toBe(130);
+    });
+
+    it('does not move the page when the area already holds the cell', () => {
+        expect(getMobileHostScrollOffset({ cellHeight: 30, moving: { top: 622, bottom: 1360 }, fixed })).toBe(0);
+        expect(getMobileHostScrollOffset({ cellHeight: 30, moving: { top: 762, bottom: 1638 }, fixed })).toBe(0);
+    });
+
+    it('keeps less padding when the room is short, and does not take the band above the fixed top', () => {
+        // ^ 92px between a host bar and the input bar: 31px each side of a 30px cell
+        expect(getMobileHostScrollOffset({ cellHeight: 30, moving, fixed: { top: 700, bottom: 792 } })).toBe(200);
+        // ^ less room than the cell: all there is
+        expect(getMobileHostScrollOffset({ cellHeight: 30, moving, fixed: { top: 780, bottom: 792 } })).toBe(120);
+    });
+
+    it('does not move the page when no scroll can make room', () => {
+        // ^ 20px of rows in a box that ends above the input bar: a scroll moves its bottom up with the band
+        expect(getMobileHostScrollOffset({ cellHeight: 30, moving: { top: 700, bottom: 720 }, fixed })).toBe(0);
+        // ^ the band is already above the top of the page
+        expect(getMobileHostScrollOffset({ cellHeight: 30, moving: { top: 40, bottom: 1638 }, fixed: { top: 49, bottom: 60 } })).toBe(0);
+    });
+});
+
 function createFrames() {
     const queue = new Map<number, () => void>();
     let next = 1;
@@ -701,6 +735,214 @@ describe('mobile edited-cell reveal on the screen', () => {
             await panel.settle();
             expect(panel.scroll).toHaveBeenCalledTimes(1);
             expect(panel.scroll.mock.calls[0][1]).toEqual({ offsetY: 195.6 });
+        } finally {
+            panel.dispose();
+        }
+    });
+});
+
+interface IHostPage {
+    windowHeight: number;
+    /** The editor's box with nothing scrolled; the canvas fills it from `canvasTop`. */
+    box: { top: number; bottom: number };
+    canvasTop: number;
+    /** How far the page — below a 49px host header, down to the window bottom — can scroll. */
+    pageMax: number;
+    /** A scroll box between the page and the editor's box (2000px tall), and how far it can scroll. */
+    innerMax?: number;
+    /** `held`: the input bar is drawn at the bottom of the window; `left-behind`: where a page scroll left it. */
+    inputBar: 'held' | 'left-behind';
+    /** The host puts its page back on the frame after it is scrolled. */
+    snapBack?: boolean;
+}
+
+/** An element that scrolls up to `max`, recording what it is asked to scroll to. */
+function createScrollBox(max: number, clientHeight: number, onSet?: (value: number) => void): HTMLElement {
+    const element = document.createElement('div');
+    element.style.overflowY = 'auto';
+    let scrollTop = 0;
+    Object.defineProperties(element, {
+        clientHeight: { configurable: true, value: clientHeight },
+        scrollHeight: { configurable: true, value: clientHeight + max },
+        scrollTop: {
+            configurable: true,
+            get: () => scrollTop,
+            set: (value: number) => {
+                scrollTop = Math.min(max, Math.max(0, value));
+                onSet?.(value);
+            },
+        },
+    });
+    return element;
+}
+
+async function renderHostPageEditingPanel(options: { startY: number; endY: number; host: IHostPage }) {
+    const frames = createFrames();
+    vi.stubGlobal('requestAnimationFrame', frames.requestFrame);
+    vi.stubGlobal('cancelAnimationFrame', frames.cancelFrame);
+    const host = options.host;
+    const viewport = Object.assign(new EventTarget(), { offsetTop: 0, height: host.windowHeight });
+    vi.stubGlobal('visualViewport', viewport);
+    vi.stubGlobal('innerHeight', host.windowHeight);
+
+    const pageScrolls: number[] = [];
+    const page: HTMLElement = createScrollBox(host.pageMax, host.windowHeight - 49, (value) => {
+        pageScrolls.push(value);
+        if (host.snapBack && value !== 0) {
+            frames.requestFrame(() => {
+                page.scrollTop = 0;
+            });
+        }
+    });
+    page.getBoundingClientRect = () => ({ top: 49, bottom: viewport.height } as DOMRect);
+    const inner = host.innerMax == null ? null : createScrollBox(host.innerMax, 2000);
+    if (inner) inner.getBoundingClientRect = () => ({ top: 49 - page.scrollTop, bottom: 2049 - page.scrollTop } as DOMRect);
+    const scrolled = () => page.scrollTop + (inner?.scrollTop ?? 0);
+    const box = document.createElement('div');
+    box.style.overflowY = 'hidden';
+    box.getBoundingClientRect = () => ({ top: host.box.top - scrolled(), bottom: host.box.bottom - scrolled() } as DOMRect);
+    const appLayout = document.createElement('div');
+    appLayout.setAttribute('data-u-comp', 'app-layout');
+    const canvas = document.createElement('canvas');
+    canvas.getBoundingClientRect = () => ({ top: host.canvasTop - scrolled(), bottom: host.box.bottom - scrolled() } as DOMRect);
+    const inputBar = document.createElement('div');
+    inputBar.setAttribute('data-u-comp', 'mobile-formula-bar');
+    Object.defineProperty(inputBar, 'offsetParent', { configurable: true, get: () => box });
+    inputBar.getBoundingClientRect = () => {
+        const bottom = host.inputBar === 'held'
+            ? Math.min(host.box.bottom - scrolled(), viewport.height)
+            : Math.min(host.box.bottom, host.windowHeight) - scrolled();
+        return { top: bottom - 48, bottom, height: 48 } as DOMRect;
+    };
+    appLayout.append(canvas, inputBar);
+    box.appendChild(appLayout);
+    if (inner) {
+        inner.appendChild(box);
+        page.appendChild(inner);
+    } else {
+        page.appendChild(box);
+    }
+    document.body.appendChild(page);
+
+    // ^ the main viewport starts below a 25px column header, with no frozen rows
+    const viewMain = { top: 25, viewportScrollY: 0 };
+    const renderUnit = {
+        engine: { getCanvasElement: () => canvas },
+        scene: { getViewport: () => viewMain },
+    };
+    const state = {
+        unitId: 'mobile-sheet',
+        sheetId: '',
+        row: 13,
+        column: 0,
+        position: { startX: 46, endX: 146, startY: options.startY, endY: options.endY },
+        canvasOffset: { left: 0, top: host.canvasTop },
+        scaleX: 1.25,
+        scaleY: 1.25,
+    };
+    const rendered = await renderMobileSheetActionPanel([], {
+        editorBridge: {
+            visible$: new BehaviorSubject({ visible: true }),
+            getEditCellState: () => state,
+            refreshEditCellPosition: vi.fn(),
+        } as unknown as IEditorBridgeService,
+        renderManager: { getRenderUnitById: () => renderUnit } as unknown as IRenderManagerService,
+    });
+    state.sheetId = rendered.subUnitId;
+    act(() => rendered.contextService.setContextValue(MOBILE_KEYBOARD_VISIBLE, true));
+    const scroll = vi.fn((_accessor: unknown, _params?: { offsetY?: number }) => true);
+    rendered.commandService.registerCommand({ id: SetScrollRelativeCommand.id, type: CommandType.COMMAND, handler: scroll });
+
+    async function settle() {
+        for (let i = 0; i < 40 && frames.pending > 0; i++) {
+            await act(async () => frames.run());
+        }
+        await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+    }
+
+    function resizeWindow(height: number) {
+        viewport.height = height;
+        vi.stubGlobal('innerHeight', height);
+        act(() => {
+            viewport.dispatchEvent(new Event('resize'));
+        });
+    }
+
+    function dispose() {
+        disposeRenderedPanel(rendered.root, rendered.container, rendered.univer);
+        page.remove();
+        vi.unstubAllGlobals();
+    }
+
+    return { ...rendered, frames, inner, page, pageScrolls, resizeWindow, scroll, settle, dispose };
+}
+
+describe('mobile edited-cell reveal in a host page that scrolls', () => {
+    // ^ a tablet with the on-screen keyboard up (the window is 840 tall): the editor's 900px box starts at 786, its
+    //   canvas at 875 and the band at 900, below the input bar held at 792; the cell is at 1003..1033
+    const low = { windowHeight: 840, box: { top: 786, bottom: 1686 }, canvasTop: 875, pageMax: 1276 };
+
+    it('scrolls the page up just far enough for the cell and the padding, then scrolls the sheet once', async () => {
+        const panel = await renderHostPageEditingPanel({ startY: 128, endY: 158, host: { ...low, inputBar: 'held' } });
+        try {
+            await panel.settle();
+            // ^ the band goes to 666, 126px above the input bar: 30px of cell and 48px each side
+            expect(panel.page.scrollTop).toBe(234);
+            expect(panel.scroll).toHaveBeenCalledTimes(1);
+            // ^ then the cell, at 769..799, is centred in 666..792: 55 screen pixels at zoom 1.25
+            expect(panel.scroll.mock.calls[0][1]).toEqual({ offsetY: 44 });
+
+            // the window comes back: the page is not scrolled back and the sheet does not scroll
+            panel.resizeWindow(1180);
+            await panel.settle();
+            expect(panel.page.scrollTop).toBe(234);
+            expect(panel.pageScrolls).toEqual([234]);
+            expect(panel.scroll).toHaveBeenCalledTimes(1);
+        } finally {
+            panel.dispose();
+        }
+    });
+
+    it('leaves the page alone when the area has room, and scrolls only the sheet', async () => {
+        // ^ the box at 508: the band at 622, 170px above the input bar
+        const panel = await renderHostPageEditingPanel({
+            startY: 304,
+            endY: 334,
+            host: { windowHeight: 840, box: { top: 508, bottom: 1408 }, canvasTop: 597, pageMax: 1276, inputBar: 'held' },
+        });
+        try {
+            await panel.settle();
+            expect(panel.pageScrolls).toEqual([]);
+            expect(panel.scroll).toHaveBeenCalledTimes(1);
+            expect(panel.scroll.mock.calls[0][1]).toEqual({ offsetY: 167.2 });
+        } finally {
+            panel.dispose();
+        }
+    });
+
+    it('scrolls the next scroll box out with what the nearest one could not give', async () => {
+        const panel = await renderHostPageEditingPanel({ startY: 128, endY: 158, host: { ...low, innerMax: 100, inputBar: 'held' } });
+        try {
+            await panel.settle();
+            expect(panel.inner!.scrollTop).toBe(100);
+            expect(panel.page.scrollTop).toBe(134);
+            expect(panel.scroll).toHaveBeenCalledTimes(1);
+            expect(panel.scroll.mock.calls[0][1]).toEqual({ offsetY: 44 });
+        } finally {
+            panel.dispose();
+        }
+    });
+
+    it('asks the page once for each change: a page that puts itself back is not asked again', async () => {
+        const panel = await renderHostPageEditingPanel({ startY: 128, endY: 158, host: { ...low, inputBar: 'left-behind', snapBack: true } });
+        try {
+            await panel.settle();
+            expect(panel.pageScrolls).toEqual([234, 0]);
+            expect(panel.frames.pending).toBe(0);
+            // ^ back where it was there is still no room, and the sheet has nothing to scroll into
+            expect(panel.scroll).not.toHaveBeenCalled();
         } finally {
             panel.dispose();
         }

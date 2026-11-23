@@ -15,6 +15,7 @@
  */
 
 // Modified by Carenode, 2026 — CNT-5176 mobile-edit-cell-visible: the edited cell is scrolled in between the frozen band and what covers the canvas from below, measured in place, in sheet units, once the layout has settled
+// Modified by Carenode, 2026 — CNT-5176 mobile-edit-cell-host-scroll: when there is no room for the edited cell at all, the host page is scrolled just far enough to make it, once, before the sheet scrolls
 
 import type { Worksheet } from '@univerjs/core';
 import type { ISelectionWithStyle } from '@univerjs/sheets';
@@ -171,6 +172,39 @@ export function getMobileCellScrollOffset(cell: IMobileVerticalSpan, area: IMobi
     return getMobileCellRevealOffset(cell.top, cell.bottom, area.top + inset, area.bottom - inset);
 }
 
+export interface IMobileHostScrollInput {
+    /** The edited cell's height on the screen. */
+    cellHeight: number;
+    /**
+     * What a scroll of the host page moves with the canvas: the band at the top; the canvas, the boxes inside the
+     * scrolled element and the input bar's place at the bottom of its box at the bottom.
+     */
+    moving: IMobileVerticalSpan;
+    /** What stays where it is: the visible window, the scrolled element and the boxes around it, an input bar held at the window bottom. */
+    fixed: IMobileVerticalSpan;
+}
+
+/**
+ * How far, in screen pixels, a scroll of the host page must move the canvas up for the area — the part of `moving`
+ * inside `fixed` — to hold the edited cell with the safe padding on both sides: less padding when the room is short, as
+ * much as there is when the cell itself does not fit. Nothing when the area already holds the cell: the sheet's own
+ * scroll can show it, and the page stays where it is. The area grows while the band rises toward the fixed top and the
+ * moving bottom is still below the fixed bottom; a scroll past that gains nothing.
+ */
+export function getMobileHostScrollOffset({ cellHeight, moving, fixed }: IMobileHostScrollInput): number {
+    const heightAt = (offset: number) =>
+        Math.min(moving.bottom - offset, fixed.bottom) - Math.max(moving.top - offset, fixed.top);
+    const height = heightAt(0);
+    if (height >= cellHeight - MOBILE_CELL_REVEAL_TOLERANCE) return 0;
+
+    const reach = Math.max(0, Math.min(moving.top - fixed.top, moving.bottom - fixed.bottom));
+    const most = heightAt(reach);
+    const wanted = most >= cellHeight
+        ? cellHeight + 2 * Math.min(MOBILE_CELL_SAFE_PADDING, (most - cellHeight) / 2)
+        : most;
+    return Math.min(reach, Math.max(0, wanted - height));
+}
+
 // ^ a cap on the wait for a layout that keeps moving (an animation): about half a second at 60 frames a second
 const MOBILE_REVEAL_MAX_SETTLE_FRAMES = 30;
 
@@ -253,11 +287,88 @@ function getMobileCanvasClips(canvas: HTMLElement): IMobileVerticalSpan[] {
             clips.push({ top: rect.top, bottom: rect.bottom });
         }
     }
-    const visualViewport = window.visualViewport;
-    clips.push(visualViewport
-        ? { top: visualViewport.offsetTop, bottom: visualViewport.offsetTop + visualViewport.height }
-        : { top: 0, bottom: window.innerHeight });
+    clips.push(getMobileVisibleWindow());
     return clips;
+}
+
+/** The visible part of the window, in client coordinates. */
+function getMobileVisibleWindow(): IMobileVerticalSpan {
+    const visualViewport = window.visualViewport;
+    return visualViewport
+        ? { top: visualViewport.offsetTop, bottom: visualViewport.offsetTop + visualViewport.height }
+        : { top: 0, bottom: window.innerHeight };
+}
+
+interface IMobileInputBar {
+    element: HTMLElement;
+    /** How far above the bar's box the formula operators reach (they sit on top of it, outside its box). */
+    operatorBar: number;
+}
+
+function getMobileInputBar(canvas: HTMLElement, formulaOperatorsVisible: boolean): IMobileInputBar | null {
+    const element = canvas.closest('[data-u-comp="app-layout"]')?.querySelector<HTMLElement>('[data-u-comp="mobile-formula-bar"]');
+    return element
+        ? { element, operatorBar: formulaOperatorsVisible ? MOBILE_FORMULA_OPERATOR_BAR_HEIGHT : 0 }
+        : null;
+}
+
+/**
+ * The elements a host page can move the canvas with, nearest first: its scrollable ancestors, then the document's
+ * scrolling element. None past a fixed box, which no scroll around it moves.
+ */
+function getMobileHostScrollers(canvas: HTMLElement): HTMLElement[] {
+    const scrollers: HTMLElement[] = [];
+    for (let element = canvas.parentElement; element && element !== document.documentElement; element = element.parentElement) {
+        const { overflowY, position } = getComputedStyle(element);
+        if ((overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight) {
+            scrollers.push(element);
+        }
+        if (position === 'fixed') return scrollers;
+    }
+    const page = document.scrollingElement;
+    if (page instanceof HTMLElement && !scrollers.includes(page) && page.scrollHeight > page.clientHeight) {
+        scrollers.push(page);
+    }
+    return scrollers;
+}
+
+/**
+ * What a scroll of `scroller` moves with the canvas and what stays, for `getMobileHostScrollOffset`. The input bar's place
+ * comes from its containing block and the visible window, not from where it is drawn: it is held at the bottom of the
+ * visible window while it is lifted above the bottom of its block (the on-screen keyboard is up, or the block reaches
+ * below the window while a cell is edited) and sits at that bottom otherwise, and a scroll of the page leaves it behind
+ * until the mobile workbench measures again.
+ */
+function measureMobileHostScroll(
+    canvas: HTMLElement,
+    mainViewportTop: number,
+    scroller: HTMLElement,
+    inputBar: IMobileInputBar | null,
+    cellHeight: number
+): IMobileHostScrollInput {
+    const canvasRect = canvas.getBoundingClientRect();
+    const moving = { top: canvasRect.top + mainViewportTop, bottom: canvasRect.bottom };
+    const visibleWindow = getMobileVisibleWindow();
+    const fixed = { ...visibleWindow };
+    for (let element = canvas.parentElement; element && element !== document.body; element = element.parentElement) {
+        if (MOBILE_CLIPPING_OVERFLOW.has(getComputedStyle(element).overflowY)) {
+            const rect = element.getBoundingClientRect();
+            const span = element !== scroller && scroller.contains(element) ? moving : fixed;
+            span.top = Math.max(span.top, rect.top);
+            span.bottom = Math.min(span.bottom, rect.bottom);
+        }
+    }
+    const block = inputBar?.element.offsetParent;
+    if (inputBar && block) {
+        const barRect = inputBar.element.getBoundingClientRect();
+        const barHeight = barRect.height + inputBar.operatorBar;
+        const blockBottom = block.getBoundingClientRect().bottom;
+        moving.bottom = Math.min(moving.bottom, blockBottom - barHeight);
+        if (barRect.bottom < blockBottom - MOBILE_CELL_REVEAL_TOLERANCE) {
+            fixed.bottom = Math.min(fixed.bottom, visibleWindow.bottom - barHeight);
+        }
+    }
+    return { cellHeight, moving, fixed };
 }
 
 export function getMobileEditingMenuBottomOffset(formulaOperatorsVisible: boolean): number {
@@ -465,19 +576,23 @@ function MobileSheetActionPanelContent() {
      * The canvas top, the main viewport's scroll and where its rows can be seen now, all measured in place; nothing
      * when the sheet is not rendered. `cover` is an open tools panel.
      */
-    const measureRevealArea = useCallback((cover: HTMLElement | null): IMobileRevealMeasure | null => {
+    const getSheetCanvas = useCallback(() => {
         const unitId = workbook?.getUnitId();
         const renderUnit = unitId ? renderManagerService.getRenderUnitById(unitId) : null;
         const canvas = renderUnit?.engine.getCanvasElement();
         const viewMain = renderUnit?.scene.getViewport(SHEET_VIEWPORT_KEY.VIEW_MAIN);
-        if (!canvas || !viewMain) return null;
+        return canvas && viewMain ? { canvas, mainViewportTop: viewMain.top, scrollY: viewMain.viewportScrollY } : null;
+    }, [renderManagerService, workbook]);
+
+    const measureRevealArea = useCallback((cover: HTMLElement | null): IMobileRevealMeasure | null => {
+        const sheetCanvas = getSheetCanvas();
+        if (!sheetCanvas) return null;
+        const { canvas, mainViewportTop, scrollY } = sheetCanvas;
 
         const coverTops: number[] = [];
-        const inputBar = canvas.closest('[data-u-comp="app-layout"]')?.querySelector('[data-u-comp="mobile-formula-bar"]');
+        const inputBar = getMobileInputBar(canvas, Boolean(contextService.getContextValue(MOBILE_FORMULA_OPERATORS_VISIBLE)));
         if (inputBar) {
-            // ^ the formula operators sit on top of the input bar, outside its box
-            const operatorBar = contextService.getContextValue(MOBILE_FORMULA_OPERATORS_VISIBLE) ? MOBILE_FORMULA_OPERATOR_BAR_HEIGHT : 0;
-            coverTops.push(inputBar.getBoundingClientRect().top - operatorBar);
+            coverTops.push(inputBar.element.getBoundingClientRect().top - inputBar.operatorBar);
         }
         if (cover) {
             coverTops.push(cover.getBoundingClientRect().top);
@@ -485,15 +600,45 @@ function MobileSheetActionPanelContent() {
         const canvasRect = canvas.getBoundingClientRect();
         return {
             canvasTop: canvasRect.top,
-            scrollY: viewMain.viewportScrollY,
+            scrollY,
             area: resolveMobileCellRevealArea({
                 canvas: { top: canvasRect.top, bottom: canvasRect.bottom },
-                mainViewportTop: viewMain.top,
+                mainViewportTop,
                 clips: getMobileCanvasClips(canvas),
                 coverTops,
             }),
         };
-    }, [contextService, renderManagerService, workbook]);
+    }, [contextService, getSheetCanvas]);
+
+    /**
+     * When the area has no room for the whole edited cell, scroll the host page — the nearest scrollable ancestor
+     * first, the next one with what is still missing, the document last — just far enough to make room for it. Whether
+     * the page moved. Not for a cell in the frozen rows: the area is where the rows below them can be seen.
+     */
+    const scrollHostForEditedCell = useCallback((): boolean => {
+        editorBridgeService.refreshEditCellPosition(false);
+        const state = editorBridgeService.getEditCellState();
+        if (!state) return false;
+        const freeze = workbook?.getSheetBySheetId(state.sheetId)?.getFreeze();
+        if (freeze && freeze.ySplit > 0 && state.row < freeze.startRow) return false;
+        const sheetCanvas = getSheetCanvas();
+        if (!sheetCanvas) return false;
+        const { canvas, mainViewportTop } = sheetCanvas;
+        const inputBar = getMobileInputBar(canvas, Boolean(contextService.getContextValue(MOBILE_FORMULA_OPERATORS_VISIBLE)));
+        // ^ an input bar opened to the whole screen leaves no room to make
+        if (inputBar?.element.getAttribute('data-expanded') === 'true') return false;
+
+        const cellHeight = state.position.endY - state.position.startY;
+        let scrolled = false;
+        for (const scroller of getMobileHostScrollers(canvas)) {
+            const offset = getMobileHostScrollOffset(measureMobileHostScroll(canvas, mainViewportTop, scroller, inputBar, cellHeight));
+            if (offset <= MOBILE_CELL_REVEAL_TOLERANCE) break;
+            const before = scroller.scrollTop;
+            scroller.scrollTop = before + offset;
+            scrolled = scrolled || scroller.scrollTop !== before;
+        }
+        return scrolled;
+    }, [contextService, editorBridgeService, getSheetCanvas, workbook]);
 
     const ensureActiveCellVisible = useCallback(async (cover: HTMLElement | null) => {
         editorBridgeService.refreshEditCellPosition(false);
@@ -536,20 +681,28 @@ function MobileSheetActionPanelContent() {
     useEffect(() => {
         if (!editing) return undefined;
 
-        // ^ one scheduler for every change of what can be seen, so changes that arrive together end in one scroll
+        // ^ one scheduler for every change of what can be seen, so changes that arrive together end in one scroll. After a
+        //   scroll of the host page the layout is measured again and the sheet then scrolls as usual: the page is asked
+        //   once for each reveal, and a page that did not give the room is not asked again.
+        let afterHostScroll = false;
         const scheduler = createMobileRevealScheduler({
             requestFrame: (callback) => requestAnimationFrame(callback),
             cancelFrame: (handle) => cancelAnimationFrame(handle),
             readLayout: () => getMobileRevealLayoutKey(measureRevealArea(null)),
             reveal: () => {
+                if (!afterHostScroll && scrollHostForEditedCell()) {
+                    afterHostScroll = true;
+                    scheduler.schedule();
+                    return;
+                }
+                afterHostScroll = false;
                 ensureActiveCellVisible(null).catch(() => undefined);
             },
         });
         const schedule = () => scheduler.schedule();
         schedule();
         // ^ the canvas follows the host's box, which can change with no window resize (a host panel above the editor)
-        const unitId = workbook?.getUnitId();
-        const canvas = unitId ? renderManagerService.getRenderUnitById(unitId)?.engine.getCanvasElement() : undefined;
+        const canvas = getSheetCanvas()?.canvas;
         const canvasObserver = canvas && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
         if (canvas) canvasObserver?.observe(canvas);
         const visualViewport = window.visualViewport;
@@ -562,7 +715,7 @@ function MobileSheetActionPanelContent() {
             visualViewport?.removeEventListener('resize', schedule);
             selectionSubscription.unsubscribe();
         };
-    }, [editing, ensureActiveCellVisible, measureRevealArea, renderManagerService, selectionManagerService, workbook]);
+    }, [editing, ensureActiveCellVisible, getSheetCanvas, measureRevealArea, scrollHostForEditedCell, selectionManagerService]);
 
     useEffect(() => {
         if (!toolsOpen || drawerSnap === 'expanded') return undefined;
