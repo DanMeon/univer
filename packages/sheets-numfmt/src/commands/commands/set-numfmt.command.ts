@@ -14,13 +14,14 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 numfmt-remove-keeps-text: removing a number format changes the style only, never the cell's value or type
+
 import type { IAccessor, ICommand, IMutationInfo, Nullable } from '@univerjs/core';
 import type {
     FormatType,
     IRemoveNumfmtMutationParams,
     ISetCellsNumfmt,
     ISetNumfmtMutationParams,
-    ISetRangeValuesMutationParams,
 } from '@univerjs/sheets';
 import {
     CellValueType,
@@ -40,7 +41,6 @@ import {
     rangeMerge,
     RemoveNumfmtMutation,
     SetNumfmtMutation,
-    SetRangeValuesMutation,
     transformCellsToRange,
 } from '@univerjs/sheets';
 import { isAllowedPatternForScientificNotationNumber, isScientificNotationNumericCell } from '../../utils/scientific-notation';
@@ -90,8 +90,8 @@ export const SetNumfmtCommand: ICommand<ISetNumfmtCommandParams> = {
                 endRow: cell.row,
             })),
         };
-        const redos: Array<IMutationInfo<IRemoveNumfmtMutationParams | ISetNumfmtMutationParams | ISetRangeValuesMutationParams>> = [];
-        const undos: Array<IMutationInfo<IRemoveNumfmtMutationParams | ISetNumfmtMutationParams | ISetRangeValuesMutationParams>> = [];
+        const redos: Array<IMutationInfo<IRemoveNumfmtMutationParams | ISetNumfmtMutationParams>> = [];
+        const undos: Array<IMutationInfo<IRemoveNumfmtMutationParams | ISetNumfmtMutationParams>> = [];
         if (setCells.length) {
             const setCellTypeObj = setCells.reduce((pre, cur) => {
                 if (isTextFormat(cur.pattern)) {
@@ -131,48 +131,17 @@ export const SetNumfmtCommand: ICommand<ISetNumfmtCommandParams> = {
         if (removeCells.length) {
             removeRedos.ranges = rangeMerge(removeRedos.ranges);
 
-            const setCellTypeObj = removeCells.reduce((pre, cur) => {
-                const cell = worksheet.getCellRaw(cur.row, cur.col);
-                if (cell) {
-                    const type = checkCellValueType(cell.v);
-                    if (type !== cell.t) {
-                        pre.setValue(cur.row, cur.col, { t: type });
-                    }
-                }
-                return pre;
-            }, new ObjectMatrix<{ t: Nullable<CellValueType> }>()).getMatrix();
-
-            const undoSetCellTypeObj = new ObjectMatrix<{ t: Nullable<CellValueType> }>();
-            new ObjectMatrix<{ t: Nullable<CellValueType> }>(setCellTypeObj).forValue((row, col) => {
-                const cell = worksheet.getCellRaw(row, col);
-                if (cell) {
-                    undoSetCellTypeObj.setValue(row, col, { t: cell.t });
-                } else {
-                    undoSetCellTypeObj.setValue(row, col, { t: undefined });
-                }
-            });
-
+            // Carenode CNT-5176 numfmt-remove-keeps-text: taking a number format off changes the style only, as putting one
+            // on does (the number format service writes `s` and nothing else). Upstream (#4585) also sent a set-range-values
+            // that re-read each cell's type from its value (`checkCellValueType(cell.v)`), so the text "0012" (STRING or
+            // FORCE_STRING) became the number 12 and a boolean became a number, and its undo carried the old type alone,
+            // which brought the value back as the text "12". A cell keeps its value and type until its value is entered
+            // again or converted (text to number), as in Excel.
             redos.push({
                 id: RemoveNumfmtMutation.id,
                 params: removeRedos,
-            }, {
-                id: SetRangeValuesMutation.id,
-                params: {
-                    unitId,
-                    subUnitId,
-                    cellValue: setCellTypeObj,
-                },
             });
-            const undo = factoryRemoveNumfmtUndoMutation(accessor, removeRedos);
-
-            undos.push({
-                id: SetRangeValuesMutation.id,
-                params: {
-                    unitId,
-                    subUnitId,
-                    cellValue: undoSetCellTypeObj.getMatrix(),
-                },
-            }, ...undo);
+            undos.push(...factoryRemoveNumfmtUndoMutation(accessor, removeRedos));
         }
 
         const result = sequenceExecute(redos, commandService).result;

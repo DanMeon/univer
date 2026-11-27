@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
-import type { Dependency, IWorkbookData, Workbook } from '@univerjs/core';
+// Modified by Carenode, 2026 — CNT-5176 numfmt-remove-keeps-text: removing a number format keeps every cell's value and type
+
+import type { Dependency, ICellData, IObjectArrayPrimitiveType, IWorkbookData, Workbook } from '@univerjs/core';
 import {
     CellValueType,
     DEFAULT_TEXT_FORMAT_EXCEL,
@@ -183,13 +185,15 @@ describe('Sheets numfmt commands', () => {
         expect(numfmtService.getValue('test', 'sheet1', 0, 0)).toEqual({ pattern: DEFAULT_TEXT_FORMAT_EXCEL });
         expect(numfmtService.getValue('test', 'sheet1', 0, 1)).toBeNull();
         expect(sheet.getCellRaw(0, 0)?.t).toBe(CellValueType.NUMBER);
-        expect(sheet.getCellRaw(0, 1)).toMatchObject({ v: 123, t: CellValueType.NUMBER });
+        // Carenode CNT-5176 numfmt-remove-keeps-text: the text cell stays text when its text format is taken off
+        // (upstream expected { v: 123, t: NUMBER } here, and { v: '123', t: STRING } after the undo).
+        expect(sheet.getCellRaw(0, 1)).toMatchObject({ v: 123, t: CellValueType.STRING });
 
         await expect(commandService.executeCommand(UndoCommand.id)).resolves.toBe(true);
 
         expect(numfmtService.getValue('test', 'sheet1', 0, 0)).toBeNull();
         expect(numfmtService.getValue('test', 'sheet1', 0, 1)).toEqual({ pattern: DEFAULT_TEXT_FORMAT_EXCEL });
-        expect(sheet.getCellRaw(0, 1)).toMatchObject({ v: '123', t: CellValueType.STRING });
+        expect(sheet.getCellRaw(0, 1)).toMatchObject({ v: 123, t: CellValueType.STRING });
 
         await expect(commandService.executeCommand(RedoCommand.id)).resolves.toBe(true);
 
@@ -366,5 +370,122 @@ describe('Sheets numfmt commands', () => {
         await expect(commandService.executeCommand(SubtractDecimalCommand.id)).resolves.toBe(false);
         await expect(commandService.executeCommand(SetPercentCommand.id)).resolves.toBe(false);
         await expect(commandService.executeCommand(SetCurrencyCommand.id)).resolves.toBe(false);
+    });
+});
+
+// Carenode CNT-5176 numfmt-remove-keeps-text: removing a number format (the 「General」 entry of the number format
+// list) turned the text "0012" into the number 12, and undo gave back the text "12".
+describe('removing a number format keeps the cell value and type', () => {
+    const ROW = 0;
+    const cells: Array<{ cell: ICellData }> = [
+        { cell: { v: '0012', t: CellValueType.STRING } }, // text as loaded from a file
+        { cell: { v: '0012', t: CellValueType.FORCE_STRING } }, // text typed with an apostrophe
+        { cell: { v: 12, t: CellValueType.NUMBER } },
+        { cell: { v: 1, t: CellValueType.BOOLEAN } }, // TRUE
+        { cell: { v: '0012' } }, // no type
+    ];
+
+    let univer: Univer;
+    let commandService: ICommandService;
+    let numfmtService: INumfmtService;
+    let workbook: Workbook;
+
+    const withRow = (row: IObjectArrayPrimitiveType<ICellData>): IWorkbookData => {
+        const data = createWorkbookData();
+        return { ...data, sheets: { sheet1: { ...data.sheets.sheet1, cellData: { [ROW]: row } } } };
+    };
+
+    beforeEach(() => {
+        const testBed = createCommandTestBed(withRow(Object.fromEntries(cells.map(({ cell }, col) => [col, { ...cell }]))));
+        univer = testBed.univer;
+        workbook = testBed.sheet;
+        commandService = testBed.get(ICommandService);
+        numfmtService = testBed.get(INumfmtService);
+        [SetRangeValuesMutation, SetNumfmtMutation, RemoveNumfmtMutation, SetNumfmtCommand].forEach((command) => {
+            commandService.registerCommand(command);
+        });
+    });
+
+    afterEach(() => {
+        univer.dispose();
+    });
+
+    const setNumfmt = (pattern?: string) => commandService.executeCommand(SetNumfmtCommand.id, {
+        values: cells.map((_, col) => ({ row: ROW, col, pattern })),
+    });
+    const read = () => cells.map((_, col) => {
+        const raw = workbook.getActiveSheet().getCellRaw(ROW, col);
+        return { v: raw?.v, t: raw?.t, pattern: numfmtService.getValue('test', 'sheet1', ROW, col)?.pattern ?? null };
+    });
+    const expected = (pattern: string | null) => cells.map(({ cell }) => ({ v: cell.v, t: cell.t, pattern }));
+
+    // ^ the cell kinds sit side by side in one row, and every step runs over the whole row
+    it('removes a format that is not there, with undo and redo', async () => {
+        await expect(setNumfmt()).resolves.toBe(true);
+        expect(read()).toEqual(expected(null));
+        await expect(commandService.executeCommand(UndoCommand.id)).resolves.toBe(true);
+        expect(read()).toEqual(expected(null));
+        await expect(commandService.executeCommand(RedoCommand.id)).resolves.toBe(true);
+        expect(read()).toEqual(expected(null));
+    });
+
+    it.each(['0.00', DEFAULT_TEXT_FORMAT_EXCEL, '#,##0'])('adds %s, removes it, and undoes and redoes both', async (pattern) => {
+        await expect(setNumfmt(pattern)).resolves.toBe(true);
+        expect(read()).toEqual(expected(pattern));
+
+        await expect(setNumfmt()).resolves.toBe(true);
+        expect(read()).toEqual(expected(null));
+
+        await expect(commandService.executeCommand(UndoCommand.id)).resolves.toBe(true);
+        expect(read()).toEqual(expected(pattern));
+
+        await expect(commandService.executeCommand(RedoCommand.id)).resolves.toBe(true);
+        expect(read()).toEqual(expected(null));
+
+        await expect(commandService.executeCommand(UndoCommand.id)).resolves.toBe(true);
+        await expect(commandService.executeCommand(UndoCommand.id)).resolves.toBe(true);
+        expect(read()).toEqual(expected(null));
+
+        await expect(commandService.executeCommand(RedoCommand.id)).resolves.toBe(true);
+        await expect(commandService.executeCommand(RedoCommand.id)).resolves.toBe(true);
+        expect(read()).toEqual(expected(null));
+    });
+
+    it('removes the format of a cell whose format sits in the loaded style', async () => {
+        const testBed = createCommandTestBed(withRow({
+            0: { v: '0012', t: CellValueType.STRING, s: 'twoDecimals' },
+            1: { v: '0012', t: CellValueType.FORCE_STRING, s: 'textStyle' },
+        }));
+        try {
+            const service = testBed.get(ICommandService);
+            [SetRangeValuesMutation, SetNumfmtMutation, RemoveNumfmtMutation, SetNumfmtCommand].forEach((command) => {
+                service.registerCommand(command);
+            });
+            const sheet = testBed.sheet.getActiveSheet();
+            const readTwo = () => [0, 1].map((col) => {
+                const raw = sheet.getCellRaw(ROW, col);
+                return { v: raw?.v, t: raw?.t, pattern: testBed.get(INumfmtService).getValue('test', 'sheet1', ROW, col)?.pattern ?? null };
+            });
+
+            await expect(service.executeCommand(SetNumfmtCommand.id, { values: [{ row: ROW, col: 0 }, { row: ROW, col: 1 }] })).resolves.toBe(true);
+            expect(readTwo()).toEqual([
+                { v: '0012', t: CellValueType.STRING, pattern: null },
+                { v: '0012', t: CellValueType.FORCE_STRING, pattern: null },
+            ]);
+
+            await expect(service.executeCommand(UndoCommand.id)).resolves.toBe(true);
+            expect(readTwo()).toEqual([
+                { v: '0012', t: CellValueType.STRING, pattern: '0.00' },
+                { v: '0012', t: CellValueType.FORCE_STRING, pattern: DEFAULT_TEXT_FORMAT_EXCEL },
+            ]);
+
+            await expect(service.executeCommand(RedoCommand.id)).resolves.toBe(true);
+            expect(readTwo()).toEqual([
+                { v: '0012', t: CellValueType.STRING, pattern: null },
+                { v: '0012', t: CellValueType.FORCE_STRING, pattern: null },
+            ]);
+        } finally {
+            testBed.univer.dispose();
+        }
     });
 });
