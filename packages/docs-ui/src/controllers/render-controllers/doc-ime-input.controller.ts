@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 ime-refused-step: a composition step the document refused does not advance the composition
+
 import type { DocumentDataModel, JSONXActions, Nullable } from '@univerjs/core';
 import type { IRenderContext, IRenderModule } from '@univerjs/engine-render';
 import type { Subscription } from 'rxjs';
-import type { IEditorInputConfig } from '../../services/selection/doc-selection-render.service';
 import {
     Disposable,
     ICommandService,
@@ -25,6 +26,7 @@ import {
     Tools,
 } from '@univerjs/core';
 import { DocSelectionManagerService, DocSkeletonManagerService, DocStateEmitService, RichTextEditingMutation } from '@univerjs/docs';
+import type { IEditorInputConfig } from '../../services/selection/doc-selection-render.service';
 import { IMEInputCommand } from '../../commands/commands/ime-input.command';
 import { DocIMEInputManagerService } from '../../services/doc-ime-input-manager.service';
 import { DocSelectionRenderService } from '../../services/selection/doc-selection-render.service';
@@ -157,7 +159,7 @@ export class DocIMEInputController extends Disposable implements IRenderModule {
             return;
         }
 
-        await this._commandService.executeCommand(IMEInputCommand.id, {
+        const applied = await this._commandService.executeCommand(IMEInputCommand.id, {
             unitId,
             newText: content,
             oldTextLen: this._previousIMEContent.length,
@@ -166,6 +168,14 @@ export class DocIMEInputController extends Disposable implements IRenderModule {
         });
 
         if (isUpdate) {
+            // A refused step (an edit lock, a protected cell) left the document as it was, so the composition state
+            // stays with what the document holds: the next step is again the first one, and a lock lifted during the
+            // composition lets that step write it. Advancing it anyway made a composition that ended on the same text
+            // close an edit that never happened ("historyParams is null in RichTextEditingMutation").
+            if (!applied) {
+                return;
+            }
+
             if (this._isCompositionStart) {
                 this._isCompositionStart = false;
             }
@@ -181,6 +191,12 @@ export class DocIMEInputController extends Disposable implements IRenderModule {
         const previousActiveRange = this._docImeInputManagerService.getActiveRange();
 
         if (previousActiveRange == null) {
+            return;
+        }
+
+        // Close only an edit this composition made. A composition none of whose steps reached the document has no
+        // recorded step, and the history interceptor throws on a composition end it has nothing to compose for.
+        if (this._docImeInputManagerService.getUndoRedoMutationParamsCache().undoCache.length === 0) {
             return;
         }
 
