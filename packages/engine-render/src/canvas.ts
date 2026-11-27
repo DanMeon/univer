@@ -15,6 +15,7 @@
  */
 
 // Modified by Carenode, 2026 — CNT-3201: Canvas.clear clears every backing pixel below DPR 1.
+// Modified by Carenode, 2026 — CNT-5176 render-task-report: a resize or dispose tells the context its saves are gone.
 
 import type { Nullable } from '@univerjs/core';
 import type { ICanvasColorService } from './services/canvas-color.service';
@@ -161,6 +162,11 @@ export class Canvas {
             canvasElement.style.height = `${this._height}px`;
         }
 
+        // Setting the canvas width or height resets its context, the state stack included.
+        if (canvasElement && (width !== undefined || height !== undefined)) {
+            this.getContext()?.resetSaveDepth();
+        }
+
         this.getContext()?.setTransform(this._pixelRatio, 0, 0, this._pixelRatio, 0, 0);
     }
 
@@ -176,6 +182,8 @@ export class Canvas {
 
     dispose() {
         this.clear();
+        // Do not keep a disposed canvas in the open-saves set when a draw left a save open on it.
+        this._context?.resetSaveDepth();
         this._canvasEle?.remove();
         this._canvasEle = null;
         this._context = null;

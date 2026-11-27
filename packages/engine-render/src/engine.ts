@@ -14,20 +14,23 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 render-task-report: a throwing render task's open saves are restored, it is reported, and the render loop goes on
+
 import type { IDisposable, Nullable } from '@univerjs/core';
+import { Disposable, EventSubject, noop, toDisposable, Tools } from '@univerjs/core';
+import { Observable, shareReplay, Subject } from 'rxjs';
 import type { CURSOR_TYPE } from './basics/const';
 import type { IEvent, IKeyboardEvent, IPointerEvent } from './basics/i-events';
 import type { ITimeMetric, ITransformChangeState } from './basics/interfaces';
 import type { IBasicFrameInfo } from './basics/performance-monitor';
 import type { Scene } from './scene';
-import { Disposable, EventSubject, noop, toDisposable, Tools } from '@univerjs/core';
-import { Observable, shareReplay, Subject } from 'rxjs';
 import { RENDER_CLASS_TYPE } from './basics/const';
 import { DeviceType, PointerInput } from './basics/i-events';
 import { TRANSFORM_CHANGE_OBSERVABLE_TYPE } from './basics/interfaces';
 import { PerformanceMonitor } from './basics/performance-monitor';
 import { getPointerPrefix, getSizeForDom, IsSafari, requestNewFrame } from './basics/tools';
 import { Canvas, CanvasRenderMode } from './canvas';
+import { snapshotOpenSaves, unwindOpenSaves } from './context-open-saves';
 import { observeClientRect } from './floating/util';
 import { ICanvasColorService } from './services/canvas-color.service';
 
@@ -36,6 +39,31 @@ export interface IEngineOption {
     elementHeight: number;
     dpr?: number;
     renderMode?: CanvasRenderMode;
+}
+
+/** How many distinct render task exceptions an engine remembers as already reported. */
+const RENDER_TASK_REPORTED_ERROR_LIMIT = 16;
+
+/**
+ * The same failure thrown again in a later frame gets the same key: its name, its message and the stack frame it was
+ * thrown at. Not the whole stack: the callers above the throw differ between frames (a scroll frame, a cached
+ * layer). Chrome's stack starts with "name: message" and Firefox's and Safari's with the first frame.
+ */
+function getRenderTaskErrorKey(error: unknown): string {
+    if (error instanceof Error) {
+        const head = error.message ? `${error.name}: ${error.message}` : error.name;
+        const stack = error.stack ?? '';
+        const frames = stack.startsWith(head) ? stack.slice(head.length) : stack;
+        const throwSite = frames.split('\n').find((line) => line.trim() !== '')?.trim() ?? '';
+        return `${head}\n${throwSite}`;
+    }
+
+    // Not String(): it throws for an object without a prototype, which would stop the loop again.
+    if (typeof error === 'object' && error !== null) {
+        return Object.prototype.toString.call(error);
+    }
+
+    return `${typeof error}: ${String(error)}`;
 }
 
 export class Engine extends Disposable {
@@ -86,6 +114,8 @@ export class Engine extends Disposable {
     private _canvas: Nullable<Canvas>;
     private _renderingQueueLaunched = false;
     private _renderFrameTasks = new Array<() => void>();
+    /** Keys of the render task exceptions this engine reported, oldest first (see _reportRenderTaskError). */
+    private readonly _reportedRenderTaskErrors = new Set<string>();
     private _requestNewFrameHandler: number = -1;
 
     private _frameId: number = -1;
@@ -530,7 +560,47 @@ export class Engine extends Disposable {
     private _renderFrame(_timestamp: number) {
         for (let index = 0; index < this._renderFrameTasks.length; index++) {
             const renderFunction = this._renderFrameTasks[index];
-            renderFunction();
+            // One throwing task stopped the loop: the frame's other tasks and _endFrame did not run and the next
+            // frame was never requested, so the sheet stopped redrawing for good. As the browser does with animation
+            // frame callbacks, the exception is reported and the rest still runs. The saves the task left open (the
+            // failed draw's clip and transform, on the main canvas and on cache canvases) are restored first, so the
+            // rest does not draw under them.
+            const openSaves = snapshotOpenSaves();
+            try {
+                renderFunction();
+            } catch (error) {
+                unwindOpenSaves(openSaves);
+                this._reportRenderTaskError(error);
+            }
+        }
+    }
+
+    /**
+     * Reports a render task's exception the way an uncaught one is reported: `reportError` fires the global `error`
+     * event (HTML "report an exception"); without it, the exception is rethrown from a timer. A failure that repeats
+     * every frame is reported once: an exception whose key (name, message and throw site) is among the last
+     * RENDER_TASK_REPORTED_ERROR_LIMIT distinct keys this engine reported is not reported again.
+     */
+    private _reportRenderTaskError(error: unknown): void {
+        const key = getRenderTaskErrorKey(error);
+        if (this._reportedRenderTaskErrors.has(key)) {
+            return;
+        }
+
+        this._reportedRenderTaskErrors.add(key);
+        if (this._reportedRenderTaskErrors.size > RENDER_TASK_REPORTED_ERROR_LIMIT) {
+            const oldest = this._reportedRenderTaskErrors.values().next().value;
+            if (oldest !== undefined) {
+                this._reportedRenderTaskErrors.delete(oldest);
+            }
+        }
+
+        if (typeof globalThis.reportError === 'function') {
+            globalThis.reportError(error);
+        } else {
+            setTimeout(() => {
+                throw error;
+            });
         }
     }
 

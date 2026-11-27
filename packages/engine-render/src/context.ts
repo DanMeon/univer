@@ -14,11 +14,14 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 render-task-report: the context counts its open saves, so the saves a throwing render task left can be restored
+
 import type { Nullable } from '@univerjs/core';
 import { Tools } from '@univerjs/core';
 import type { ICanvasColorService } from './services/canvas-color.service';
 import type { IRenderConfig } from './services/render-config';
 import { fixLineWidthByScale, getColor } from './basics/tools';
+import { addContextWithOpenSaves, deleteContextWithOpenSaves } from './context-open-saves';
 
 export interface IUniverRenderingContextOptions {
     canvasColorService?: ICanvasColorService;
@@ -31,6 +34,8 @@ export class UniverRenderingContext2D implements CanvasRenderingContext2D {
     private _cacheScale = false;
     private _bitmapMutationId = 0;
     private _bitmapMutationTrackingDepth = 0;
+    /** save()s not yet restored through this wrapper — the native state stack's depth (context-open-saves.ts). */
+    private _saveDepth = 0;
     readonly canvas: HTMLCanvasElement;
 
     _context: CanvasRenderingContext2D;
@@ -465,7 +470,21 @@ export class UniverRenderingContext2D implements CanvasRenderingContext2D {
     reset() {
         this._transformCache = null;
         this._context.reset();
+        this.resetSaveDepth();
         this._markBitmapMutation();
+    }
+
+    getSaveDepth(): number {
+        return this._saveDepth;
+    }
+
+    /**
+     * The native drawing state was reset — reset(), the canvas resized (Canvas.setSize), the canvas disposed — so no
+     * save is open any more.
+     */
+    resetSaveDepth(): void {
+        this._saveDepth = 0;
+        deleteContextWithOpenSaves(this);
     }
 
     /**
@@ -951,6 +970,13 @@ export class UniverRenderingContext2D implements CanvasRenderingContext2D {
         this._transformCache = null;
         this._normalizedCachedFont = '';
         this._context.restore();
+        // A restore with no save open does nothing natively either.
+        if (this._saveDepth > 0) {
+            this._saveDepth--;
+            if (this._saveDepth === 0) {
+                deleteContextWithOpenSaves(this);
+            }
+        }
     }
 
     /**
@@ -968,6 +994,9 @@ export class UniverRenderingContext2D implements CanvasRenderingContext2D {
      */
     save() {
         this._context.save();
+        if (this._saveDepth++ === 0) {
+            addContextWithOpenSaves(this);
+        }
     }
 
     /**
