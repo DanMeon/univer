@@ -16,6 +16,8 @@
 
 // @vitest-environment jsdom
 
+// Modified by Carenode, 2026 — CNT-5176 keep-host-focus: no focus request takes focus from an edit field of the host page
+
 import type { IDisposable, IDocumentData, ITextRangeParam } from '@univerjs/core';
 import type { Mock } from 'vitest';
 import {
@@ -1181,9 +1183,10 @@ describe('DocSelectionRenderService', () => {
             expect(document.activeElement).toBe(input);
             expect(focusSpy).toHaveBeenCalledTimes(2);
 
-            const otherInput = document.createElement('input');
-            document.body.appendChild(otherInput);
-            otherInput.focus();
+            // A button, not an input: a host page's edit field keeps its focus (keep-host-focus, below).
+            const otherControl = document.createElement('button');
+            document.body.appendChild(otherControl);
+            otherControl.focus();
             service.focus();
 
             expect(document.activeElement).toBe(input);
@@ -1456,6 +1459,113 @@ describe('DocSelectionRenderService', () => {
 
         popover.dataset.state = 'closed';
         service.sync();
+        expect(document.activeElement).toBe(input);
+    });
+
+    function createFocusableField(kind: 'input' | 'textarea' | 'select' | 'contenteditable' | 'button' | 'link'): HTMLElement {
+        if (kind === 'contenteditable') {
+            const editable = document.createElement('div');
+            editable.setAttribute('contenteditable', 'true');
+            editable.tabIndex = 0;
+            // jsdom does not implement isContentEditable.
+            Object.defineProperty(editable, 'isContentEditable', { configurable: true, value: true });
+            return editable;
+        }
+        if (kind === 'link') {
+            const link = document.createElement('a');
+            link.href = '#comment';
+            return link;
+        }
+        return document.createElement(kind);
+    }
+
+    it.each(['input', 'textarea', 'select', 'contenteditable'] as const)(
+        'leaves focus with a host page %s for every focus request (keep-host-focus)',
+        (kind) => {
+            const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+            cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+            const field = createFocusableField(kind);
+            document.body.appendChild(field);
+            field.focus();
+            expect(document.activeElement).toBe(field);
+
+            service.focus();
+            expect(document.activeElement).toBe(field);
+            service.sync();
+            expect(document.activeElement).toBe(field);
+            service.activate(12, 34, true);
+            expect(document.activeElement).toBe(field);
+            service.activate(12, 34);
+            expect(document.activeElement).toBe(field);
+
+            // A press on the sheet blurs the field first; the request after it takes focus.
+            field.blur();
+            expect(document.activeElement).toBe(document.body);
+            service.focus();
+            expect(document.activeElement).toBe(input);
+        }
+    );
+
+    it.each(['button', 'link'] as const)('takes focus from a host page %s (keep-host-focus)', (kind) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const control = createFocusableField(kind);
+        document.body.appendChild(control);
+        control.focus();
+        expect(document.activeElement).toBe(control);
+
+        service.focus();
+
+        expect(document.activeElement).toBe(input);
+    });
+
+    it('takes focus from an input in a Univer popup portal marked data-u-comp (keep-host-focus)', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        // A cell popup (the member picker's search box) sits in the body portal, outside the registered containers.
+        const popup = document.createElement('section');
+        popup.dataset.uComp = 'rect-popup';
+        const search = document.createElement('input');
+        popup.appendChild(search);
+        document.body.appendChild(popup);
+        search.focus();
+
+        service.focus();
+
+        expect(document.activeElement).toBe(input);
+    });
+
+    it('takes focus from another Univer editor input outside the layout (keep-host-focus)', () => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const otherEditorInput = createFocusableField('contenteditable');
+        otherEditorInput.dataset.uComp = 'editor';
+        document.body.appendChild(otherEditorInput);
+        otherEditorInput.focus();
+
+        service.focus();
+
+        expect(document.activeElement).toBe(input);
+    });
+
+    it.each(['root', 'registered'] as const)('takes focus from an input inside a %s Univer layout container (keep-host-focus)', (place) => {
+        const { input, renderUnit, service, univer } = createRealSelectionRenderService();
+        cleanup.push(() => renderUnit.dispose(), () => univer.dispose());
+        const field = document.createElement('input');
+        if (place === 'root') {
+            TestLayoutService.root.appendChild(field);
+        } else {
+            // A dialog the layout registered as a container, mounted beside the root.
+            const dialog = document.createElement('div');
+            dialog.appendChild(field);
+            document.body.appendChild(dialog);
+            const layoutService = univer.__getInjector().get(ILayoutService);
+            layoutService.checkElementInCurrentContainers = (element: HTMLElement) => dialog.contains(element);
+        }
+        field.focus();
+
+        service.focus();
+
         expect(document.activeElement).toBe(input);
     });
 

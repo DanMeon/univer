@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 keep-host-focus: no focus request takes focus from an edit field of the host page
+
 import type { DocumentDataModel, Nullable } from '@univerjs/core';
 import type {
     Documents,
@@ -621,6 +623,13 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
     }
 
     focus(): void {
+        // Every focus request ends here (a mount's first cell selection, a cell editor re-focus, a selection sync).
+        // Taking focus from an edit field of the host page moved the rest of what the person typed there (a
+        // comment box beside the sheet) into the sheet. A press on the sheet blurs that field before any request.
+        if (this._isHostEditFieldFocused()) {
+            return;
+        }
+
         // The layout may mount after the input; keep focus inside its owning modal.
         this._ensureHostContainer();
         if (!this._input.hasAttribute('tabindex')) {
@@ -1848,6 +1857,30 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
         }
 
         return this._embedInteractionBoundaryService?.hasRecentInteractionFor?.(currentEmbedOwner, ownerDocument) === true;
+    }
+
+    /**
+     * An edit field of the host page holds focus: an input, textarea, select or contenteditable element that is not
+     * this editor's input and is not part of Univer's UI. Univer's UI is what its layout registered (root, ribbon,
+     * formula bar, each editor's input box) and the floating surfaces it mounts in the body portal (cell popups,
+     * design inputs, other editors' inputs), each of which carries `data-u-comp`; those hand focus back to the sheet
+     * when they close, so they do not count. A focused button, link or body does not count either.
+     */
+    private _isHostEditFieldFocused(): boolean {
+        const activeElement = this._getOwnerDocument().activeElement;
+        if (!(activeElement instanceof HTMLElement) || this._containsOwnEditorElement(activeElement)) {
+            return false;
+        }
+
+        if (!activeElement.isContentEditable && !activeElement.matches('input, textarea, select')) {
+            return false;
+        }
+
+        if (activeElement.closest('[data-u-comp]')) {
+            return false;
+        }
+
+        return !this._containsCurrentLayoutElement(activeElement);
     }
 
     private _isInUnfocusedFrame(): boolean {
