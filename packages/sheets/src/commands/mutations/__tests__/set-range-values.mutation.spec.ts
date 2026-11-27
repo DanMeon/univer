@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 format-only-keeps-text-type: a style-only update keeps the cell's value and type, number format included
+
 import type { ICellData } from '@univerjs/core';
 import {
     CellValueType,
@@ -134,47 +136,51 @@ describe('SetRangeValuesMutation preparation', () => {
             update: { v: null },
             expected: {},
         },
+        // Carenode CNT-5176 format-only-keeps-text-type: a style-only update keeps the cell's value and type also when
+        // its number format changes. In the seven rows from here to 'replacement style removing a numeric format'
+        // upstream expected the type read again from the value — { v: '14', t: STRING } in the first, { v: 14,
+        // t: NUMBER } in the other six.
         {
             name: 'new text format',
             cell: { v: 14, t: CellValueType.NUMBER },
             update: { s: { n: { pattern: DEFAULT_TEXT_FORMAT_EXCEL } } },
-            expected: { v: '14', t: CellValueType.STRING },
+            expected: { v: 14, t: CellValueType.NUMBER },
         },
         {
             name: 'new numeric format',
             cell: { v: '014', t: CellValueType.STRING },
             update: { s: { n: { pattern: '0.00' } } },
-            expected: { v: 14, t: CellValueType.NUMBER },
+            expected: { v: '014', t: CellValueType.STRING },
         },
         {
             name: 'text format replaced with a numeric format',
             cell: { v: '014', t: CellValueType.STRING, s: { n: { pattern: DEFAULT_TEXT_FORMAT_EXCEL } } },
             update: { s: { n: { pattern: '0.00' } } },
-            expected: { v: 14, t: CellValueType.NUMBER },
+            expected: { v: '014', t: CellValueType.STRING },
         },
         {
             name: 'new general format',
             cell: { v: '014', t: CellValueType.STRING },
             update: { s: { n: { pattern: DEFAULT_NUMBER_FORMAT } } },
-            expected: { v: 14, t: CellValueType.NUMBER },
+            expected: { v: '014', t: CellValueType.STRING },
         },
         {
             name: 'cleared numeric format',
             cell: { v: '014', t: CellValueType.STRING, s: { n: { pattern: '0.00' } } },
             update: { s: { n: null } },
-            expected: { v: 14, t: CellValueType.NUMBER },
+            expected: { v: '014', t: CellValueType.STRING },
         },
         {
             name: 'cleared style with a numeric format',
             cell: { v: '014', t: CellValueType.STRING, s: { n: { pattern: '0.00' } } },
             update: { s: null },
-            expected: { v: 14, t: CellValueType.NUMBER },
+            expected: { v: '014', t: CellValueType.STRING },
         },
         {
             name: 'replacement style removing a numeric format',
             cell: { v: '014', t: CellValueType.STRING, s: { n: { pattern: '0.00' } } },
             update: { s: { bg: { rgb: '#2C53F1' } } },
-            expected: { v: 14, t: CellValueType.NUMBER },
+            expected: { v: '014', t: CellValueType.STRING },
             isOverrideStyle: true,
         },
         {
@@ -195,6 +201,88 @@ describe('SetRangeValuesMutation preparation', () => {
             cell: { v: '014', t: CellValueType.FORCE_STRING },
             update: { s: { n: { pattern: '0.00' } } },
             expected: { v: '014', t: CellValueType.FORCE_STRING },
+        },
+        // Carenode CNT-5176 format-only-keeps-text-type: more number format changes that keep the cell, and payloads
+        // with a value or a type that still decide it.
+        ...[CellValueType.STRING, CellValueType.FORCE_STRING].flatMap((t) => [
+            {
+                name: `text "0012" (t ${t}) with a new numeric format`,
+                cell: { v: '0012', t },
+                update: { s: { n: { pattern: '0.00' } } },
+                expected: { v: '0012', t },
+            },
+            {
+                name: `text "0012" (t ${t}) with a new general format`,
+                cell: { v: '0012', t },
+                update: { s: { n: { pattern: DEFAULT_NUMBER_FORMAT } } },
+                expected: { v: '0012', t },
+            },
+            {
+                name: `text "0012" (t ${t}) with a cleared numeric format`,
+                cell: { v: '0012', t, s: { n: { pattern: '0.00' } } },
+                update: { s: { n: null } },
+                expected: { v: '0012', t },
+            },
+            {
+                name: `text "0012" (t ${t}) with a new text format`,
+                cell: { v: '0012', t },
+                update: { s: { n: { pattern: DEFAULT_TEXT_FORMAT_EXCEL } } },
+                expected: { v: '0012', t },
+            },
+        ]),
+        {
+            name: 'boolean-looking text with a new numeric format',
+            cell: { v: 'TRUE', t: CellValueType.STRING },
+            update: { s: { n: { pattern: '0.00' } } },
+            expected: { v: 'TRUE', t: CellValueType.STRING },
+        },
+        {
+            name: 'boolean with a new text format',
+            cell: { v: 1, t: CellValueType.BOOLEAN },
+            update: { s: { n: { pattern: DEFAULT_TEXT_FORMAT_EXCEL } } },
+            expected: { v: 1, t: CellValueType.BOOLEAN },
+        },
+        {
+            name: 'number with a new numeric format',
+            cell: { v: 14, t: CellValueType.NUMBER },
+            update: { s: { n: { pattern: '0.00' } } },
+            expected: { v: 14, t: CellValueType.NUMBER },
+        },
+        {
+            name: 'number with a cleared numeric format',
+            cell: { v: 14, t: CellValueType.NUMBER, s: { n: { pattern: '0.00' } } },
+            update: { s: { n: null } },
+            expected: { v: 14, t: CellValueType.NUMBER },
+        },
+        {
+            name: 'text with a new value and a new numeric format',
+            cell: { v: '0012', t: CellValueType.STRING },
+            update: { v: '0015', s: { n: { pattern: '0.00' } } },
+            expected: { v: 15, t: CellValueType.NUMBER },
+        },
+        {
+            name: 'forced text with a new value',
+            cell: { v: '0012', t: CellValueType.FORCE_STRING },
+            update: { v: '0015' },
+            expected: { v: 15, t: CellValueType.NUMBER },
+        },
+        {
+            name: 'text-formatted text with a new value',
+            cell: { v: '0012', t: CellValueType.STRING, s: { n: { pattern: DEFAULT_TEXT_FORMAT_EXCEL } } },
+            update: { v: '0015' },
+            expected: { v: '0015', t: CellValueType.STRING },
+        },
+        {
+            name: 'explicit text type and value with a new numeric format',
+            cell: { v: '0012', t: CellValueType.STRING },
+            update: { v: '0015', t: CellValueType.STRING, s: { n: { pattern: '0.00' } } },
+            expected: { v: '0015', t: CellValueType.STRING },
+        },
+        {
+            name: 'explicit numeric type with a new text format',
+            cell: { v: '0012', t: CellValueType.STRING },
+            update: { t: CellValueType.NUMBER, s: { n: { pattern: DEFAULT_TEXT_FORMAT_EXCEL } } },
+            expected: { v: 12, t: CellValueType.NUMBER },
         },
     ])('prepares and applies $name without unintended value conversions', ({ cell, update, expected, isOverrideStyle }) => {
         const sheet = bed.sheet.getSheets()[0];

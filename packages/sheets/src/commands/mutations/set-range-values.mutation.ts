@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 format-only-keeps-text-type: a style-only payload never re-types a typed cell, number format included
+
 import type {
     IAccessor,
     ICellData,
@@ -204,8 +206,12 @@ function isStaleFormulaResult(cell: Nullable<ICellData>, source: Nullable<Pick<I
 
 const overwriteCellPropertiesSet = new Set(['f', 'p', 'si', 'custom', 'ref', 'xf', 'ft', 'fd']);
 function mergeCellData(newValue: ICellData, oldValue: ICellData, styles: Styles, isOverrideStyle = false) {
+    // Carenode CNT-5176 format-only-keeps-text-type: a payload with neither `v` nor `t` keeps a typed cell's value and
+    // type, also when its number format changes. Upstream (#7951) re-read the type from the value when the pattern
+    // changed, so a STRING "0012" given `0.00` or General (format painter, paste of formats, a style-only setValues)
+    // became the number 12 and a number given `@` became the text "14", where SetNumfmtCommand changes the style only
+    // and a FORCE_STRING cell already stayed. A cell keeps its value and type until its value is entered again.
     const canPreserveValue = newValue.v === undefined && newValue.t === undefined && oldValue.t != null;
-    const previousStyle = canPreserveValue ? styles.getStyleByCell(oldValue) : undefined;
     const type = canPreserveValue ? oldValue.t : getCellType(styles, newValue, oldValue);
     Object.keys(newValue).forEach((key) => {
         const cellPropertyKey = key as keyof ICellData;
@@ -231,13 +237,9 @@ function mergeCellData(newValue: ICellData, oldValue: ICellData, styles: Styles,
         delete oldValue.fd;
     }
 
-    const numberFormatChanged = canPreserveValue &&
-        previousStyle?.n?.pattern !== styles.getStyleByCell(oldValue)?.n?.pattern;
-    if (oldValue.v !== undefined && (!canPreserveValue || numberFormatChanged)) {
-        // Format changes still infer from the original style, including forced/text-formatted values.
-        const nextType = numberFormatChanged ? getCellType(styles, newValue, { ...oldValue, s: previousStyle }) : type;
-        oldValue.t = nextType;
-        oldValue.v = getCellValue(nextType, oldValue);
+    if (oldValue.v !== undefined && !canPreserveValue) {
+        oldValue.t = type;
+        oldValue.v = getCellValue(type, oldValue);
     }
 
     if (oldValue.v === null) {

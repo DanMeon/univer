@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 format-only-keeps-text-type: a style-only value keeps the cell's value and type
+
 import type {
     ICellData,
     IDocumentData,
@@ -24,7 +26,6 @@ import type {
     Univer,
     Workbook,
 } from '@univerjs/core';
-import type { ISetRangeValuesCommandParams } from '../set-range-values.command';
 import {
     BooleanNumber,
     CellValueType,
@@ -41,6 +42,7 @@ import {
     UniverInstanceType,
 } from '@univerjs/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { ISetRangeValuesCommandParams } from '../set-range-values.command';
 import { SheetsSelectionsService } from '../../../services/selections/selection.service';
 import { SetRangeValuesMutation, SetRangeValuesUndoMutationFactory } from '../../mutations/set-range-values.mutation';
 import { SetSelectionsOperation } from '../../operations/selection.operation';
@@ -1019,8 +1021,10 @@ describe('Test set range values commands', () => {
                     return params;
                 }
 
+                // Carenode CNT-5176 format-only-keeps-text-type: the number 1 that is given only the text format stays the
+                // number 1 (upstream expected { v: '1', t: STRING }), as SetNumfmtCommand leaves it.
                 expect(await commandService.executeCommand(SetRangeValuesCommand.id, getParams())).toBeTruthy();
-                expect(getValues(0, 2, 0, 5)).toStrictEqual([[{ s: 's5', v: '01', t: CellValueType.STRING }, { s: 's5', v: '0.20', t: CellValueType.STRING }, { v: '001', t: CellValueType.FORCE_STRING }, { s: 's5', v: '1', t: CellValueType.STRING }]]);
+                expect(getValues(0, 2, 0, 5)).toStrictEqual([[{ s: 's5', v: '01', t: CellValueType.STRING }, { s: 's5', v: '0.20', t: CellValueType.STRING }, { v: '001', t: CellValueType.FORCE_STRING }, { s: 's5', v: 1, t: CellValueType.NUMBER }]]);
 
                 // undo
                 expect(await commandService.executeCommand(UndoCommand.id)).toBeTruthy();
@@ -1028,7 +1032,7 @@ describe('Test set range values commands', () => {
 
                 // redo
                 expect(await commandService.executeCommand(RedoCommand.id)).toBeTruthy();
-                expect(getValues(0, 2, 0, 5)).toStrictEqual([[{ s: 's5', v: '01', t: CellValueType.STRING }, { s: 's5', v: '0.20', t: CellValueType.STRING }, { v: '001', t: CellValueType.FORCE_STRING }, { s: 's5', v: '1', t: CellValueType.STRING }]]);
+                expect(getValues(0, 2, 0, 5)).toStrictEqual([[{ s: 's5', v: '01', t: CellValueType.STRING }, { s: 's5', v: '0.20', t: CellValueType.STRING }, { v: '001', t: CellValueType.FORCE_STRING }, { s: 's5', v: 1, t: CellValueType.NUMBER }]]);
             });
 
             it('set value when origin cell has number in text format, set new number format', async () => {
@@ -1047,10 +1051,12 @@ describe('Test set range values commands', () => {
 
                 expect(styles).toStrictEqual([[{ n: { pattern: '0%' } }]]);
 
+                // Carenode CNT-5176 format-only-keeps-text-type: the text "001" stays text when only its number format
+                // changes (upstream expected { v: 1, t: NUMBER } here and after the redo).
                 delete newValue?.[0][0]?.s;
                 expect(newValue).toStrictEqual([[{
-                    v: 1,
-                    t: CellValueType.NUMBER,
+                    v: '001',
+                    t: CellValueType.STRING,
                 }]]);
 
                 // undo
@@ -1067,8 +1073,8 @@ describe('Test set range values commands', () => {
 
                 delete redoNewValue?.[0][0]?.s;
                 expect(redoNewValue).toStrictEqual([[{
-                    v: 1,
-                    t: CellValueType.NUMBER,
+                    v: '001',
+                    t: CellValueType.STRING,
                 }]]);
             });
 

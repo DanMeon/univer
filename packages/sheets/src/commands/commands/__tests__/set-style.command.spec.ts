@@ -14,10 +14,13 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 format-only-keeps-text-type: a style-only number format keeps the cells' values and types
+
 import type { IColorStyle, Injector, IStyleData, ITextDecoration, ITextRotation, Univer, Workbook } from '@univerjs/core';
 import {
     BooleanNumber,
     CellValueType,
+    DEFAULT_NUMBER_FORMAT,
     DEFAULT_TEXT_FORMAT_EXCEL,
     FontItalic,
     FontWeight,
@@ -157,6 +160,52 @@ describe("Test commands used for updating cells' styles", () => {
             restored.univer.dispose();
         }
     });
+
+    // Carenode CNT-5176 format-only-keeps-text-type: a style-only number format (format painter, paste of formats,
+    // SetStyleCommand with type `n`) re-read a STRING cell from its value, so "0012" became the number 12.
+    it.each(['0.00', DEFAULT_NUMBER_FORMAT, DEFAULT_TEXT_FORMAT_EXCEL])(
+        'keeps text, numbers and booleans through a style-only number format %s, undo and redo',
+        async (pattern) => {
+            const workbook = get(IUniverInstanceService).getUnit<Workbook>('test', UniverInstanceType.UNIVER_SHEET)!;
+            const worksheet = workbook.getSheetBySheetId('sheet1')!;
+            const unitId = workbook.getUnitId();
+            const subUnitId = worksheet.getSheetId();
+            const cellValue = {
+                0: { 0: { v: '0012', t: CellValueType.STRING } },
+                1: { 0: { v: '0012', t: CellValueType.FORCE_STRING } },
+                2: { 0: { v: '0012', t: CellValueType.STRING, s: { n: { pattern: '#,##0' } } } },
+                3: { 0: { v: 12, t: CellValueType.NUMBER } },
+                4: { 0: { v: 1, t: CellValueType.BOOLEAN } },
+            };
+            expect(commandService.syncExecuteCommand(SetRangeValuesMutation.id, { unitId, subUnitId, cellValue })).toBe(true);
+            get(SheetsSelectionsService).addSelections([{
+                range: { startRow: 0, endRow: 4, startColumn: 0, endColumn: 0, rangeType: RANGE_TYPE.NORMAL },
+                primary: null,
+                style: null,
+            }]);
+            const readCells = () => [0, 1, 2, 3, 4].map((row) => {
+                const cell = worksheet.getCellRaw(row, 0);
+                return { v: cell?.v, t: cell?.t, pattern: workbook.getStyles().getStyleByCell(cell)?.n?.pattern ?? null };
+            });
+            const values = [
+                { v: '0012', t: CellValueType.STRING },
+                { v: '0012', t: CellValueType.FORCE_STRING },
+                { v: '0012', t: CellValueType.STRING },
+                { v: 12, t: CellValueType.NUMBER },
+                { v: 1, t: CellValueType.BOOLEAN },
+            ];
+            const before = values.map((value, row) => ({ ...value, pattern: row === 2 ? '#,##0' : null }));
+            const after = values.map((value) => ({ ...value, pattern }));
+
+            expect(readCells()).toEqual(before);
+            expect(await commandService.executeCommand(SetStyleCommand.id, { style: { type: 'n', value: { pattern } } })).toBe(true);
+            expect(readCells()).toEqual(after);
+            expect(await commandService.executeCommand(UndoCommand.id)).toBe(true);
+            expect(readCells()).toEqual(before);
+            expect(await commandService.executeCommand(RedoCommand.id)).toBe(true);
+            expect(readCells()).toEqual(after);
+        }
+    );
 
     it('set array of style', async () => {
         const range = { startRow: 1, startColumn: 1, endColumn: 3, endRow: 3, rangeType: RANGE_TYPE.NORMAL };
