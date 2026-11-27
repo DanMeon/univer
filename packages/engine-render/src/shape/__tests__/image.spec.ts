@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 broken-image-skip: an image without pixels (failed or still loading) is not drawn
+
 import { describe, expect, it, vi } from 'vitest';
 import { Vector2 } from '../../basics/vector2';
 import { Canvas } from '../../canvas';
@@ -25,6 +27,8 @@ function createNativeImage(width = 120, height = 80, source?: string) {
     Object.defineProperty(img, 'width', { value: width, configurable: true });
     Object.defineProperty(img, 'height', { value: height, configurable: true });
     Object.defineProperty(img, 'complete', { value: true, configurable: true });
+    // A loaded image has pixels; jsdom loads none, so its naturalWidth stays 0 (broken-image-skip skips that).
+    Object.defineProperty(img, 'naturalWidth', { value: width, configurable: true });
     if (source) {
         img.src = source;
     }
@@ -359,6 +363,130 @@ describe('image extra', () => {
         }
         expect(cacheCanvas.width * cacheCanvas.height).toBeLessThanOrEqual(4_000_000);
         expect(drawImage.mock.calls.filter(([source]) => source === cacheCanvas)).toHaveLength(2);
+
+        drawImage.mockRestore();
+        image.dispose();
+        canvas.dispose();
+    });
+});
+
+describe('image without pixels (CNT-5176 broken-image-skip)', () => {
+    const BROKEN = "InvalidStateError: Failed to execute 'drawImage': The HTMLImageElement provided is in the 'broken' state.";
+
+    // The <img> state the browser reports: broken = complete with no pixels, loading = not complete yet.
+    function controlImageState(img: HTMLImageElement, state: { complete: boolean; naturalWidth: number }) {
+        Object.defineProperty(img, 'complete', { configurable: true, get: () => state.complete });
+        Object.defineProperty(img, 'naturalWidth', { configurable: true, get: () => state.naturalWidth });
+    }
+
+    // drawImage as Chrome does it: it throws for a broken <img> and draws anything else.
+    function spyOnBrowserDrawImage() {
+        return vi.spyOn(UniverRenderingContext.prototype, 'drawImage').mockImplementation((...args: unknown[]) => {
+            const [source] = args;
+            if (source instanceof HTMLImageElement && source.complete && source.naturalWidth === 0) {
+                throw new Error(BROKEN);
+            }
+        });
+    }
+
+    it('skips a broken image, then draws it once it has pixels', () => {
+        const native = document.createElement('img');
+        const state = { complete: true, naturalWidth: 0 };
+        controlImageState(native, state);
+        const image = new Image('broken-image', { image: native, left: 0, top: 0, width: 40, height: 20 });
+        const canvas = new Canvas({ width: 50, height: 30, pixelRatio: 1 });
+        const drawImage = spyOnBrowserDrawImage();
+
+        expect(() => image.render(canvas.getContext())).not.toThrow();
+        expect(drawImage).not.toHaveBeenCalled();
+
+        state.naturalWidth = 40;
+        image.render(canvas.getContext());
+        expect(drawImage.mock.calls.filter(([source]) => source === native)).toHaveLength(1);
+
+        drawImage.mockRestore();
+        image.dispose();
+        canvas.dispose();
+    });
+
+    it('skips an image that is still loading', () => {
+        const native = document.createElement('img');
+        controlImageState(native, { complete: false, naturalWidth: 0 });
+        const image = new Image('loading-image', { image: native, left: 0, top: 0, width: 40, height: 20 });
+        const ctx = createCtxMock();
+
+        image.render(ctx);
+
+        expect(ctx.drawImage).not.toHaveBeenCalled();
+    });
+
+    it('draws a source without naturalWidth, such as a canvas', () => {
+        const source = document.createElement('canvas');
+        const image = new Image('canvas-image', {
+            image: source as unknown as HTMLImageElement,
+            left: 0,
+            top: 0,
+            width: 40,
+            height: 20,
+        });
+        const ctx = createCtxMock();
+
+        image.render(ctx);
+
+        expect(ctx.drawImage).toHaveBeenCalledWith(source, -20, -10, 40, 20);
+    });
+
+    it.each([
+        ['the fallback picture', undefined],
+        ['a fail callback', vi.fn()],
+    ])('does not throw on a url image that failed to load, with %s', (_name, fail) => {
+        const image = new Image('failed-url-image', { url: 'https://example.com/401.png', left: 0, top: 0, width: 40, height: 20, fail });
+        const native = image.getNative()!;
+        const state = { complete: true, naturalWidth: 0 };
+        controlImageState(native, state);
+        const canvas = new Canvas({ width: 50, height: 30, pixelRatio: 1 });
+        const drawImage = spyOnBrowserDrawImage();
+
+        // The frame between the failed load and its error event, then the frames after it.
+        expect(() => image.render(canvas.getContext())).not.toThrow();
+        native.onerror!(new Event('error'));
+        expect(() => image.render(canvas.getContext())).not.toThrow();
+        expect(drawImage).not.toHaveBeenCalled();
+
+        drawImage.mockRestore();
+        image.dispose();
+        canvas.dispose();
+    });
+
+    it('builds the raster cache only from a loaded image, after its onload', () => {
+        const svg = createSvgDataUrl(`
+            <svg xmlns="http://www.w3.org/2000/svg">
+                <defs><filter id="noise"><feTurbulence /></filter></defs>
+                <rect width="10" height="10" filter="url(#noise)" />
+            </svg>
+        `);
+        const image = new Image('cached-broken-image', { url: svg, left: 0, top: 0, width: 10, height: 10 });
+        const native = image.getNative()!;
+        const state = { complete: true, naturalWidth: 0 };
+        controlImageState(native, state);
+        const canvas = new Canvas({ width: 20, height: 20, pixelRatio: 1 });
+        const drawImage = spyOnBrowserDrawImage();
+        const drawnSources = () => drawImage.mock.calls.map(([source]) => source);
+
+        // Broken: neither the image nor a cache canvas is drawn.
+        image.render(canvas.getContext());
+        expect(drawnSources()).toEqual([]);
+
+        // The load completes; onload marks the shape dirty, and the next frame fills the cache from the pixels.
+        state.naturalWidth = 10;
+        native.onload!(new Event('load'));
+        image.render(canvas.getContext());
+        const cacheCanvas = drawnSources().find((source) => source instanceof HTMLCanvasElement);
+        expect(drawnSources()).toEqual([native, cacheCanvas]);
+
+        // A clean frame reuses that cache.
+        image.render(canvas.getContext());
+        expect(drawnSources()).toEqual([native, cacheCanvas, cacheCanvas]);
 
         drawImage.mockRestore();
         image.dispose();

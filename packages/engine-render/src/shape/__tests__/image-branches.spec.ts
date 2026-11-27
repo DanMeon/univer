@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 broken-image-skip: an image without pixels (failed or still loading) is not drawn
+
 import { describe, expect, it, vi } from 'vitest';
 import { Image } from '../image';
 
@@ -22,6 +24,8 @@ function createNativeImage(width = 120, height = 80) {
     Object.defineProperty(img, 'width', { value: width, configurable: true });
     Object.defineProperty(img, 'height', { value: height, configurable: true });
     Object.defineProperty(img, 'complete', { value: true, configurable: true });
+    // A loaded image has pixels; jsdom loads none, so its naturalWidth stays 0 (broken-image-skip skips that).
+    Object.defineProperty(img, 'naturalWidth', { value: width, configurable: true });
     return img;
 }
 

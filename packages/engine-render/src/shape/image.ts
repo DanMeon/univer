@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 broken-image-skip: an image without pixels (failed or still loading) is not drawn
+
 import type { ISrcRect, Nullable } from '@univerjs/core';
 import type { IObjectFullState, ITransformChangeState, IViewportInfo } from '../basics';
 import type { UniverRenderingContext } from '../context';
@@ -447,6 +449,15 @@ export class Image extends Shape<IImageProps> {
         if (native == null) {
             return;
         }
+
+        // An <img> that failed to load is "broken" and drawImage throws InvalidStateError on it, which stopped the
+        // render loop of the whole sheet; one still loading has nothing to draw. Skip it until it has pixels (the
+        // test Font._drawFallbackImage uses): its onload, or the fallback image's, marks the shape dirty. Checked
+        // before the raster cache so that neither path draws it. A source without naturalWidth (a canvas) draws.
+        if ('naturalWidth' in native && !(native.complete && native.naturalWidth > 0)) {
+            return;
+        }
+
         const w = renderWidth ?? this.width;
         const h = renderHeight ?? this.height;
 
