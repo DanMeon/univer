@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 ios-caret-move-reset: passes the platform service to the base service
+
 import type { DocumentDataModel } from '@univerjs/core';
 import type { IMouseEvent, IPointerEvent, IRenderContext } from '@univerjs/engine-render';
 import {
@@ -29,7 +31,7 @@ import {
 } from '@univerjs/core';
 import { DocSelectionManagerService, DocSkeletonManagerService } from '@univerjs/docs';
 import { getSystemHighlightColor, ScrollTimer } from '@univerjs/engine-render';
-import { ILayoutService } from '@univerjs/ui';
+import { ILayoutService, IPlatformService } from '@univerjs/ui';
 import { BehaviorSubject, distinctUntilChanged, map } from 'rxjs';
 import type { MobileTextRangeHandleType } from './mobile-text-selection-visuals';
 import { neoGetDocObject } from '../../basics/component-tools';
@@ -70,7 +72,8 @@ export class MobileDocSelectionRenderService extends DocSelectionRenderService {
         @Inject(DocSkeletonManagerService) private readonly _mobileDocSkeletonManagerService: DocSkeletonManagerService,
         @Inject(DocSelectionManagerService) docSelectionManagerService: DocSelectionManagerService,
         @Optional(IDocEmbedInteractionBoundaryService) embedInteractionBoundaryService?: IDocEmbedInteractionBoundaryService,
-        @Optional(IDocEmbedRuntimeFocusCoordinator) embedRuntimeFocusCoordinator?: IDocEmbedRuntimeFocusCoordinator
+        @Optional(IDocEmbedRuntimeFocusCoordinator) embedRuntimeFocusCoordinator?: IDocEmbedRuntimeFocusCoordinator,
+        @Optional(IPlatformService) platformService?: IPlatformService
     ) {
         super(
             context,
@@ -81,7 +84,8 @@ export class MobileDocSelectionRenderService extends DocSelectionRenderService {
             _mobileDocSkeletonManagerService,
             docSelectionManagerService,
             embedInteractionBoundaryService,
-            embedRuntimeFocusCoordinator
+            embedRuntimeFocusCoordinator,
+            platformService
         );
 
         this._selectionVisuals = new MobileTextSelectionVisuals(this._context.scene);

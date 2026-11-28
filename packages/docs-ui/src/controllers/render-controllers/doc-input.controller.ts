@@ -14,12 +14,15 @@
  * limitations under the License.
  */
 
-import type { DocumentDataModel, Nullable } from '@univerjs/core';
-import type { IInsertTextCommandParams } from '@univerjs/docs';
-import type { IRenderContext, IRenderModule } from '@univerjs/engine-render';
+// Modified by Carenode, 2026 — CNT-5176 ios-hangul-replace: an input that replaces the text before the caret replaces it in the document
+
+import type { DocumentDataModel, IDocumentBody, Nullable } from '@univerjs/core';
+import type { IDeleteTextCommandParams, IInsertTextCommandParams } from '@univerjs/docs';
+import type { IRenderContext, IRenderModule, ITextRangeWithStyle } from '@univerjs/engine-render';
 import type { Subscription } from 'rxjs';
-import { Disposable, ICommandService, Inject, Optional, SHEET_EDITOR_UNITS } from '@univerjs/core';
-import { DocSkeletonManagerService, InsertTextCommand } from '@univerjs/docs';
+import { DeleteDirection, Disposable, ICommandService, Inject, Optional, SHEET_EDITOR_UNITS } from '@univerjs/core';
+import { DeleteTextCommand, DocSkeletonManagerService, InsertTextCommand } from '@univerjs/docs';
+import type { IEditorInputConfig } from '../../services/selection/doc-selection-render.service';
 import {
     getCustomDecorationAtPosition,
     getCustomRangeAtPosition,
@@ -71,6 +74,10 @@ export class DocInputController extends Disposable implements IRenderModule {
             const { unitId } = this._context;
 
             const { event, content = '', activeRange, rangeList = [] } = config;
+            // Present when the hidden input resolved this input into an edit of the text it typed (see
+            // IEditorInputConfig.replacedText); such an input puts in `content` even without `data`.
+            const isPlatformTextEdit = config.replacedText !== undefined;
+            const replacedText = config.replacedText ?? '';
 
             const e = event as InputEvent;
             if (e.defaultPrevented) {
@@ -83,7 +90,7 @@ export class DocInputController extends Disposable implements IRenderModule {
 
             const skeleton = this._docSkeletonManagerService.getSkeleton();
 
-            if (e.data == null || skeleton == null || activeRange == null) {
+            if ((e.data == null && !isPlatformTextEdit) || skeleton == null || activeRange == null) {
                 return;
             }
 
@@ -92,6 +99,12 @@ export class DocInputController extends Disposable implements IRenderModule {
             const docDataModel = this._context.unit;
             const originBody = docDataModel.getSelfOrHeaderFooterModel(segmentId)?.getBody();
             if (!originBody) {
+                return;
+            }
+
+            // The platform removed text it had typed and inserted nothing after it.
+            if (content === '' && replacedText !== '') {
+                await this._removeReplacedText(config, originBody, replacedText);
                 return;
             }
 
@@ -138,7 +151,8 @@ export class DocInputController extends Disposable implements IRenderModule {
                 await this._commandService.executeCommand<IInsertTextCommandParams>(InsertTextCommand.id, {
                     unitId,
                     body: insertBody,
-                    range: activeRange,
+                    // One edit replaces the platform's earlier text, so undo goes back to that text.
+                    range: this._getReplaceRange(config, originBody, replacedText) ?? activeRange,
                     segmentId,
                 });
             }
@@ -148,6 +162,51 @@ export class DocInputController extends Disposable implements IRenderModule {
                 await this._commandService.executeCommand(AfterSpaceCommand.id);
             }
         });
+    }
+
+    private async _removeReplacedText(config: IEditorInputConfig, body: IDocumentBody, replacedText: string): Promise<void> {
+        const { activeRange } = config;
+        if (activeRange == null || this._getReplaceRange(config, body, replacedText) == null) {
+            return;
+        }
+
+        await this._commandService.executeCommand<IDeleteTextCommandParams>(DeleteTextCommand.id, {
+            unitId: this._context.unitId,
+            range: activeRange,
+            segmentId: activeRange.segmentId,
+            direction: DeleteDirection.LEFT,
+            len: replacedText.length,
+        });
+    }
+
+    /**
+     * The range the input replaces when it carries `replacedText`: that text, right before a single collapsed caret.
+     * The hidden input stays as the platform typed it while the document caret can move (a tap, a shortcut such as
+     * Backspace, a change from elsewhere), so the replacement applies only while the document still holds that text
+     * there; otherwise the input only inserts, as an input that replaces nothing.
+     */
+    private _getReplaceRange(config: IEditorInputConfig, body: IDocumentBody, replacedText: string): Nullable<ITextRangeWithStyle> {
+        const { activeRange, rangeList = [] } = config;
+        if (replacedText === '' || activeRange == null || !activeRange.collapsed) {
+            return null;
+        }
+
+        if (rangeList.length > 1 || this._docSelectionRenderService.getAllRectRanges().length > 0) {
+            return null;
+        }
+
+        const { startOffset } = activeRange;
+        const replaceStart = startOffset - replacedText.length;
+        if (replaceStart < 0 || body.dataStream.slice(replaceStart, startOffset) !== replacedText) {
+            return null;
+        }
+
+        return {
+            ...activeRange,
+            startOffset: replaceStart,
+            endOffset: startOffset,
+            collapsed: false,
+        };
     }
 
     private _isEmbedChildInputActive(unitId: string, event: Event): boolean {

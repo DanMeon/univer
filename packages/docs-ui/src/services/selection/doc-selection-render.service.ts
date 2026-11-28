@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Modified by Carenode, 2026 — CNT-5176 keep-host-focus: no focus request takes focus from an edit field of the host page
+// Modified by Carenode, 2026 — CNT-5176 keep-host-focus: no focus request takes focus from an edit field of the host page; CNT-5176 ios-hangul-replace: the hidden input keeps typed text so a platform that replaces the text before the caret (iOS Korean keyboard) replaces it in the document; CNT-5176 ios-enter-beforeinput: the hidden input refuses the platform's line breaks at beforeinput; CNT-5176 ios-autocorrect-off: the hidden input turns Safari autocorrect off; CNT-5176 ios-caret-move-reset: on iOS a caret moved by other means than the platform's input ends the keyboard's composition
 
 import type { DocumentDataModel, Nullable } from '@univerjs/core';
 import type {
@@ -60,7 +60,7 @@ import {
     ScrollTimer,
     Vector2,
 } from '@univerjs/engine-render';
-import { ILayoutService, KeyCode } from '@univerjs/ui';
+import { ILayoutService, IPlatformService, KeyCode } from '@univerjs/ui';
 import { BehaviorSubject, filter, fromEvent, merge, Subject, takeUntil } from 'rxjs';
 import type { RectRange } from './rect-range';
 import {
@@ -70,6 +70,7 @@ import {
 } from '../doc-embed-integration.service';
 import { getEditorRuntimeConfig } from '../editor/editor-runtime-config';
 import { compareNodePositionLogic } from './convert-text-range';
+import { diffHiddenInputText } from './hidden-input-edit';
 import {
     getCanvasOffsetByEngine,
     getParagraphInfoByGlyph,
@@ -88,7 +89,21 @@ export interface IEditorInputConfig {
     content?: string;
     activeRange?: Nullable<ITextRangeWithStyle>;
     rangeList?: ITextRangeWithStyle[];
+    /**
+     * The text right before the active range that this input replaces with `content` (an empty `content` removes it,
+     * an empty `replacedText` only inserts `content`). Set when the platform edits text it typed itself: the iOS Korean
+     * keyboard joins a jamo to the syllable before the caret by removing that syllable and inserting the joined one,
+     * without composition events, and a tapped suggestion replaces the word before the caret (insertReplacementText,
+     * which carries no `data`). When set, `content` is the text to put in even if the event has no `data`. The receiver
+     * checks that the document still holds this text there before replacing it.
+     */
+    replacedText?: string;
 }
+
+// keydown.keyCode of a key an input method takes (W3C UI Events, "Key codes for keydown and keyup events": 229).
+const IME_PROCESS_KEY_CODE = 229;
+// keydown.key of modifier keys (W3C UI Events KeyboardEvent key values, "Modifier keys"); pressed alone they edit nothing.
+const MODIFIER_KEYS = new Set(['Alt', 'AltGraph', 'CapsLock', 'Control', 'Fn', 'FnLock', 'Meta', 'NumLock', 'ScrollLock', 'Shift', 'Symbol', 'SymbolLock']);
 
 export class DocSelectionRenderService extends RxDisposable implements IRenderModule {
     private readonly _onInputBefore$ = new Subject<Nullable<IEditorInputConfig>>();
@@ -166,6 +181,27 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
     >();
 
     private _isIMEInputApply = false;
+    // The platform-typed text left in the hidden input (see _handlePlatformInput). Empty whenever the input is emptied.
+    private _keptInputText = '';
+    // A removal the platform made from the kept text, held for the insertion that follows it in the same task.
+    private _pendingPlatformRemoval: Nullable<{
+        event: InputEvent;
+        removed: string;
+        timer: ReturnType<typeof setTimeout>;
+    }> = null;
+
+    // iOS: whether the keyboard may still be composing the syllable before the caret of the hidden input. Set by every
+    // platform text input, cleared when the hidden input loses focus or the composition is ended on purpose.
+    private _mayContinuePlatformComposition = false;
+    // The caret the document is expected to show next: where the last published selection put it, or where the
+    // platform input being applied puts it. A published selection elsewhere moved the caret by other means.
+    private _expectedCaret: Nullable<{ segmentId: string; offset: number }> = null;
+    // Set while the task of a platform input runs: the selection its edit publishes is the platform's own.
+    private _platformInputTaskTimer: Nullable<ReturnType<typeof setTimeout>> = null;
+    // A read-only text field that takes focus for a moment to end the iOS composition (see _endPlatformComposition).
+    private _compositionBreaker: Nullable<HTMLInputElement> = null;
+    private _isEndingPlatformComposition = false;
+
     private _scenePointerMoveSubs: Array<Subscription> = [];
     private _scenePointerUpSubs: Array<Subscription> = [];
     // When the user switches editors, whether to clear the doc ranges.
@@ -234,13 +270,15 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
         @Inject(DocSkeletonManagerService) private readonly _docSkeletonManagerService: DocSkeletonManagerService,
         @Inject(DocSelectionManagerService) private readonly _docSelectionManagerService: DocSelectionManagerService,
         @Optional(IDocEmbedInteractionBoundaryService) private readonly _embedInteractionBoundaryService?: IDocEmbedInteractionBoundaryService,
-        @Optional(IDocEmbedRuntimeFocusCoordinator) private readonly _embedRuntimeFocusCoordinator?: IDocEmbedRuntimeFocusCoordinator
+        @Optional(IDocEmbedRuntimeFocusCoordinator) private readonly _embedRuntimeFocusCoordinator?: IDocEmbedRuntimeFocusCoordinator,
+        @Optional(IPlatformService) private readonly _platformService?: IPlatformService
     ) {
         super();
         this._initDOM();
         this._registerContainer();
         this._setSystemHighlightColorToStyle();
         this._listenCurrentUnitChange();
+        this._listenCaretMovedByOtherMeans();
     }
 
     private _listenCurrentUnitChange() {
@@ -257,6 +295,112 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
                     this.removeAllRanges();
                 }
             });
+    }
+
+    /**
+     * iOS: the keyboard composes Korean on the syllable before the caret of the hidden input and learns of no caret
+     * move made on the canvas (a tap in the open editor, a tap on another cell, a selection set by code). The first
+     * key after such a move then joined the syllable typed before it ("나다", tap before 나, ㄱ → "닥나다"). Every
+     * selection the document shows passes here, so a caret that lands elsewhere than where the platform's own input
+     * puts it ends the composition (CNT-5176, measured in iOS Safari: only a focus move to another text field does).
+     */
+    private _listenCaretMovedByOtherMeans(): void {
+        this.disposeWithMe(
+            this._textSelectionInner$.subscribe((selection) => {
+                const caret = this._getPublishedCaret(selection);
+                const expected = this._expectedCaret;
+                this._expectedCaret = caret;
+                if (this._platformInputTaskTimer != null) {
+                    return;
+                }
+                if (caret != null && expected != null && caret.segmentId === expected.segmentId && caret.offset === expected.offset) {
+                    return;
+                }
+                this._endPlatformComposition();
+            })
+        );
+    }
+
+    private _getPublishedCaret(selection: Nullable<IDocSelectionInnerParam>): Nullable<{ segmentId: string; offset: number }> {
+        if (selection == null || selection.rectRanges.length > 0 || selection.textRanges.length !== 1) {
+            return null;
+        }
+        const [range] = selection.textRanges;
+        if (!range.collapsed) {
+            return null;
+        }
+        return { segmentId: selection.segmentId, offset: range.startOffset };
+    }
+
+    // Marks the task of a platform input and the caret its edit puts the document at, so the selection the edit
+    // publishes (now or after layout) is not taken for a move by other means.
+    private _expectPlatformEdit(config: IEditorInputConfig): void {
+        this._mayContinuePlatformComposition = true;
+        if (this._platformInputTaskTimer != null) {
+            clearTimeout(this._platformInputTaskTimer);
+        }
+        this._platformInputTaskTimer = setTimeout(() => {
+            this._platformInputTaskTimer = null;
+        }, 0);
+
+        const { activeRange, content = '', replacedText } = config;
+        if (activeRange == null) {
+            return;
+        }
+        const inserts = replacedText !== undefined || (config.event as InputEvent).data != null;
+        const start = activeRange.collapsed && replacedText ? activeRange.startOffset - replacedText.length : activeRange.startOffset;
+        this._expectedCaret = {
+            segmentId: activeRange.segmentId ?? this._currentSegmentId,
+            offset: start + (inserts ? content.length : 0),
+        };
+    }
+
+    /**
+     * Ends the iOS keyboard's composition and drops the text the hidden input keeps, keeping the focus and the
+     * keyboard. Measured in iOS Safari (CNT-5176): a focus moved to another text field and back ends it — a
+     * read-only <input> does, an element that only takes focus does not — while a blur and focus of the same
+     * element, a selection set again, an emptied input, an inputmode or contenteditable switch, or a re-attached
+     * element do not. The focus moves are invisible to Univer: its own focus handlers skip them and the focusin and
+     * focusout events stop at the two fields.
+     */
+    private _endPlatformComposition(): void {
+        if (!this._mayContinuePlatformComposition || this._platformService?.isIOS !== true || this._isIMEInputApply || !this.isFocusing) {
+            return;
+        }
+        this._flushPlatformRemoval();
+        this._mayContinuePlatformComposition = false;
+        this._clearInput();
+
+        // In the page only for the moment, so it never stays a field the keyboard's previous/next buttons or the page's
+        // own code could reach. It leaves after the input has the focus back: removing the focused field would hand the
+        // focus to the page body for a moment.
+        const breaker = this._getCompositionBreaker();
+        this._inputParent.appendChild(breaker);
+        this._isEndingPlatformComposition = true;
+        try {
+            breaker.focus({ preventScroll: true });
+            this._input.focus({ preventScroll: true });
+        } finally {
+            this._isEndingPlatformComposition = false;
+            breaker.remove();
+        }
+    }
+
+    private _getCompositionBreaker(): HTMLInputElement {
+        if (this._compositionBreaker != null) {
+            return this._compositionBreaker;
+        }
+        const breaker = this._getOwnerDocument().createElement('input');
+        breaker.readOnly = true;
+        breaker.tabIndex = -1;
+        breaker.setAttribute('aria-hidden', 'true');
+        // 16px keeps iOS from zooming the page to the field it focuses.
+        breaker.style.cssText = 'position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; font-size: 16px;';
+        const stop = (event: Event) => event.stopPropagation();
+        breaker.addEventListener('focusin', stop);
+        breaker.addEventListener('focusout', stop);
+        this._compositionBreaker = breaker;
+        return breaker;
     }
 
     get activeViewPort() {
@@ -1036,6 +1180,9 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
         `;
 
         this._input.contentEditable = 'true';
+        // Safari's autocorrect would now act on the typed text the input keeps; a table of numbers, names and
+        // abbreviations does not get its words replaced.
+        this._input.setAttribute('autocorrect', 'off');
 
         // TODO: to be removed
         this._input.dataset.uComp = 'editor';
@@ -1543,7 +1690,18 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
                 this._stopEmbedOwnedEditorShortcutPropagation(e);
                 this._eventHandle(e, (config) => {
                     this._onKeydown$.next(config);
-                });
+                }, this._keepsInputTextOnKeydown(e));
+            })
+        );
+
+        this.disposeWithMe(
+            fromEvent<InputEvent>(this._input, 'beforeinput').subscribe((e) => {
+                // Line breaks come from document commands, never from the platform editing the hidden input. On iOS the
+                // Enter key's default is left to run (ShortcutService) so the on-screen keyboard ends its composition, and
+                // the newline it would insert is refused here.
+                if (e.inputType === 'insertParagraph' || e.inputType === 'insertLineBreak') {
+                    e.preventDefault();
+                }
             })
         );
 
@@ -1554,6 +1712,8 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
                 }
                 // A mixed text and rect selection can replace the selected document ranges.
                 if ((e as InputEvent).inputType === 'historyUndo' || (e as InputEvent).inputType === 'historyRedo') {
+                    // The platform's undo edited the hidden input, not the document; drop what it left.
+                    this._clearInput();
                     return;
                 }
                 if (this._rectRangeList.length > 0 && this._getActiveRange() == null) {
@@ -1565,11 +1725,7 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
                     return;
                 }
 
-                this._eventHandle(e, (config) => {
-                    this._onInputBefore$.next(config);
-                    this._refreshMissingInputRange(config);
-                    this._onInput$.next(config);
-                });
+                this._handlePlatformInput(e as InputEvent);
             })
         );
 
@@ -1631,10 +1787,19 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
 
         this.disposeWithMe(
             fromEvent(this._input, 'focus').subscribe((e) => {
-                if (this._shouldSuppressHostHiddenEditorEvent(e)) {
+                if (this._isEndingPlatformComposition || this._shouldSuppressHostHiddenEditorEvent(e)) {
                     return;
                 }
                 this._handleInputFocus(e);
+            })
+        );
+
+        // The focus moves that end an iOS composition stay inside this service (see _endPlatformComposition).
+        this.disposeWithMe(
+            merge(fromEvent(this._input, 'focusin'), fromEvent(this._input, 'focusout')).subscribe((e) => {
+                if (this._isEndingPlatformComposition) {
+                    e.stopPropagation();
+                }
             })
         );
 
@@ -1648,9 +1813,13 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
 
         this.disposeWithMe(
             fromEvent(this._input, 'blur').subscribe((e) => {
-                if (this._shouldSuppressHostHiddenEditorEvent(e)) {
+                if (this._isEndingPlatformComposition || this._shouldSuppressHostHiddenEditorEvent(e)) {
                     return;
                 }
+                // A removal still held belongs to the editing that is ending.
+                this._flushPlatformRemoval();
+                // Leaving the input ends the keyboard's composition (measured: a commit that blurs starts anew).
+                this._mayContinuePlatformComposition = false;
                 this._handleInputBlur(e);
             })
         );
@@ -1701,12 +1870,127 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
         func: (config: IEditorInputConfig) => void,
         preserveInput = false
     ) {
-        const content = this._input.textContent || '';
+        this._flushPlatformRemoval();
+
+        const content = this._readNewInputText();
 
         if (!preserveInput) {
-            this._input.innerHTML = '';
+            this._clearInput();
         }
 
+        func(this._createInputConfig(e, content));
+    }
+
+    /**
+     * Native input that is not part of a composition. The hidden input keeps what the platform typed, so a platform
+     * that edits its own text finds it there: the iOS Korean keyboard types "ㅎ", then for "ㅏ" removes "ㅎ"
+     * (deleteContentBackward) and inserts "하" (insertText) in the same task (measured in iOS Safari, CNT-5176). An
+     * input emptied after every event loses the removal — the platform has nothing to remove and fires no event — and
+     * the document got "ㅎ하". A removal or replacement at the end of the kept text becomes `replacedText` of the input
+     * that follows; any other edit is handled as before, from an emptied input.
+     */
+    private _handlePlatformInput(e: InputEvent): void {
+        const before = this._keptInputText;
+        const after = this._input.textContent || '';
+        const edit = diffHiddenInputText(before, after);
+
+        if (e.inputType === 'deleteContentBackward' && edit.atEnd && edit.removed !== '' && edit.inserted === '') {
+            this._keptInputText = after;
+            const config = this._createInputConfig(e, '');
+            this._expectPlatformEdit(config);
+            this._onInputBefore$.next(config);
+            this._holdPlatformRemoval(e, edit.removed);
+            return;
+        }
+
+        // insertText puts `data` at the caret and leaves the kept text before it as it was.
+        const isTypedAtEnd = e.inputType === 'insertText' && e.data != null && after === before + e.data;
+        // insertReplacementText (iOS autocorrect, a tapped suggestion) carries no `data`; what changed at the end is the
+        // replacement — "Teh" → "The" replaces "eh", the suggestion "한글날" for "한글" only appends "날".
+        const isReplacedAtEnd = e.inputType === 'insertReplacementText' && edit.atEnd && (edit.removed !== '' || edit.inserted !== '');
+        if (!isTypedAtEnd && !isReplacedAtEnd) {
+            this._eventHandle(e, (config) => {
+                this._expectPlatformEdit(config);
+                this._onInputBefore$.next(config);
+                this._refreshMissingInputRange(config);
+                this._onInput$.next(config);
+            });
+            return;
+        }
+
+        this._keptInputText = after;
+        const config = this._createInputConfig(e, isTypedAtEnd ? e.data! : edit.inserted);
+        config.replacedText = this._takePlatformRemoval() + (isTypedAtEnd ? '' : edit.removed);
+        this._expectPlatformEdit(config);
+        this._onInputBefore$.next(config);
+        this._refreshMissingInputRange(config);
+        this._onInput$.next(config);
+    }
+
+    private _holdPlatformRemoval(event: InputEvent, removed: string): void {
+        // A second removal before any insertion took the text before the first one.
+        const earlier = this._takePlatformRemoval();
+        this._pendingPlatformRemoval = {
+            event,
+            removed: removed + earlier,
+            timer: setTimeout(() => this._flushPlatformRemoval(), 0),
+        };
+    }
+
+    private _takePlatformRemoval(): string {
+        const pending = this._pendingPlatformRemoval;
+        if (pending == null) {
+            return '';
+        }
+
+        clearTimeout(pending.timer);
+        this._pendingPlatformRemoval = null;
+        return pending.removed;
+    }
+
+    // A removal that no insertion followed applies on its own.
+    private _flushPlatformRemoval(): void {
+        const event = this._pendingPlatformRemoval?.event;
+        if (event == null) {
+            return;
+        }
+
+        const config = this._createInputConfig(event, '');
+        config.replacedText = this._takePlatformRemoval();
+        this._expectPlatformEdit(config);
+        this._refreshMissingInputRange(config);
+        this._onInput$.next(config);
+    }
+
+    // Only a key that types one character, or a modifier pressed on its own, keeps the typed text for the edit that may
+    // follow it — iOS sends keydown "Shift" before a doubled consonant (해 → Shift → ㅆ replaces 해 with 했). Any other key
+    // starts from an emptied hidden input as before: a key the document handled (a shortcut such as Backspace), a key an
+    // input method takes, Enter (on iOS its default is refused at beforeinput, not here), a navigation key or a modified
+    // key that could move the caret inside the input.
+    private _keepsInputTextOnKeydown(e: Event): boolean {
+        const event = e as KeyboardEvent;
+        if (event.defaultPrevented || event.isComposing || event.keyCode === IME_PROCESS_KEY_CODE || typeof event.key !== 'string') {
+            return false;
+        }
+        if (MODIFIER_KEYS.has(event.key)) {
+            return true;
+        }
+        return !event.ctrlKey && !event.metaKey && !event.altKey && [...event.key].length === 1;
+    }
+
+    // Text the hidden input received since the kept text, wherever it landed; the kept text was handled when it was
+    // typed. An edit away from the end (the caret moved inside the input: iOS space-bar cursor, macOS Ctrl+B) still
+    // gives only the new text, which goes in at the document caret as it did when the input was always empty.
+    private _readNewInputText(): string {
+        return diffHiddenInputText(this._keptInputText, this._input.textContent || '').inserted;
+    }
+
+    private _clearInput(): void {
+        this._input.innerHTML = '';
+        this._keptInputText = '';
+    }
+
+    private _createInputConfig(e: Event | CompositionEvent | KeyboardEvent, content: string): IEditorInputConfig {
         // Geometry remains on the previous page until the edited page is ready.
         // Continue native input from the existing logical selection only while
         // that exact selection is waiting for publication.
@@ -1721,12 +2005,12 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
             ? this._getActiveRange()
             : rangeList.find((range) => range.isActive);
 
-        func({
+        return {
             event: e,
             content,
             activeRange,
             rangeList,
-        });
+        };
     }
 
     private _shouldSuppressHostHiddenEditorEvent(event: Event): boolean {
@@ -1949,6 +2233,11 @@ export class DocSelectionRenderService extends RxDisposable implements IRenderMo
     }
 
     private _detachEvent() {
+        this._takePlatformRemoval();
+        if (this._platformInputTaskTimer != null) {
+            clearTimeout(this._platformInputTaskTimer);
+            this._platformInputTaskTimer = null;
+        }
         this._onInputBefore$.complete();
         this._onKeydown$.complete();
         this._onInput$.complete();

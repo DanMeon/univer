@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 ios-hangul-replace: replays the iOS Korean keyboard's input events; CNT-5176 ios-caret-move-reset: a caret moved by other means ends the iOS composition
+
 // @vitest-environment jsdom
 
 import type { DocumentDataModel, IDocumentData } from '@univerjs/core';
@@ -23,6 +25,7 @@ import {
     BooleanNumber,
     CustomRangeType,
     DataStreamTreeTokenType,
+    DeleteDirection,
     DocumentFlavor,
     DrawingTypeEnum,
     HorizontalAlign,
@@ -37,6 +40,7 @@ import {
     UniverInstanceType,
 } from '@univerjs/core';
 import {
+    DeleteTextCommand,
     DocLayoutExecutorService,
     DocSelectionManagerService,
     DocSkeletonManagerService,
@@ -53,7 +57,7 @@ import {
     IRenderManagerService,
     RenderManagerService,
 } from '@univerjs/engine-render';
-import { CanvasPopupService, ContextMenuService, ICanvasPopupService, IContextMenuService, ILayoutService } from '@univerjs/ui';
+import { CanvasPopupService, ContextMenuService, ICanvasPopupService, IContextMenuService, ILayoutService, IPlatformService } from '@univerjs/ui';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -83,6 +87,9 @@ import { MobileDocBackScrollRenderController } from '../mobile/back-scroll.rende
 import { MobileDocSelectionRenderController } from '../mobile/doc-selection-render.controller';
 import { MobileDocRenderController } from '../mobile/doc.render-controller';
 
+// The platform the next editor sees; the iOS tests turn isIOS on.
+const testPlatform = { isMac: false, isWindows: false, isLinux: false, isIOS: false };
+
 function createEditor(paragraphCount = 8, withDrawing = true, workerBeforeLayout = false, documentFlavor = DocumentFlavor.TRADITIONAL, withFootnote = false, mobile = false, renderingFontsReady?: Promise<void>, worker?: Partial<IDocLayoutExecutor>) {
     if (workerBeforeLayout) {
         // Model computation cost separately from fake timers so foreground work yields before Worker handoff.
@@ -97,6 +104,7 @@ function createEditor(paragraphCount = 8, withDrawing = true, workerBeforeLayout
         rootContainerElement: root,
         registerContainerElement: () => ({ dispose() {} }),
     } as unknown as ILayoutService }]);
+    injector.add([IPlatformService, { useValue: { ...testPlatform } }]);
     injector.add([IRenderManagerService, { useClass: RenderManagerService }]);
     injector.add([ICanvasPopupService, { useClass: CanvasPopupService }]);
     injector.add([IContextMenuService, { useClass: ContextMenuService }]);
@@ -121,7 +129,7 @@ function createEditor(paragraphCount = 8, withDrawing = true, workerBeforeLayout
     injector.add([DocMenuStyleService]);
     injector.add([IEditorService, { useClass: EditorService }]);
     const commands = injector.get(ICommandService);
-    [InsertTextCommand, AfterSpaceCommand, BreakLineCommand, IMEInputCommand, RichTextEditingMutation, SetTextSelectionsOperation]
+    [InsertTextCommand, DeleteTextCommand, AfterSpaceCommand, BreakLineCommand, IMEInputCommand, RichTextEditingMutation, SetTextSelectionsOperation]
         .forEach((command) => commands.registerCommand(command));
     const firstParagraph = 'Hello world';
     const drawingToken = withDrawing ? DataStreamTreeTokenType.CUSTOM_BLOCK : '';
@@ -815,5 +823,467 @@ describe('DocRenderController bounded input publication', () => {
         } finally {
             editor.dispose();
         }
+    });
+
+    describe('iOS Korean keyboard', () => {
+        // Replays iOS Safari's Korean keyboard as measured on iOS 27 (CNT-5176): every key fires keydown with keyCode 0
+        // and no composition event. A key that joins the syllable before the caret then removes that syllable from the
+        // editable (deleteContentBackward) and inserts the joined text (insertText) in the same task — "ㅎ", "ㅏ" gives
+        // "ㅎ" then remove "ㅎ" + insert "하"; "닭", "ㅏ" gives remove "닭" + insert "달가". When the editable does not
+        // hold the syllable (it was emptied), no removal event fires and only the insertion comes.
+        type Key = [key: string, remove: number, insert: string];
+
+        function press(input: HTMLElement, [key, remove, insert]: Key, keyCode = 0): void {
+            input.dispatchEvent(new KeyboardEvent('keydown', { key, keyCode, bubbles: true, cancelable: true }));
+            const held = input.textContent ?? '';
+            if (remove > 0 && held.length >= remove) {
+                input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'deleteContentBackward', bubbles: true, cancelable: true }));
+                input.textContent = held.slice(0, held.length - remove);
+                input.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
+            }
+            input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: insert, bubbles: true, cancelable: true }));
+            input.textContent = (input.textContent ?? '') + insert;
+            input.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: insert, bubbles: true }));
+        }
+
+        async function settle(): Promise<void> {
+            for (let index = 0; index < 8; index++) {
+                await Promise.resolve();
+            }
+        }
+
+        async function type(editor: ReturnType<typeof createEditor>, keys: Key[], after?: (text: string) => void): Promise<void> {
+            for (const key of keys) {
+                press(editor.input, key);
+                await settle();
+                after?.(key[2]);
+            }
+        }
+
+        const HANGEUL: Key[] = [['ㅎ', 0, 'ㅎ'], ['ㅏ', 1, '하'], ['ㄴ', 1, '한'], ['ㄱ', 0, 'ㄱ'], ['ㅡ', 1, '그'], ['ㄹ', 1, '글']];
+        const DALGA: Key[] = [['ㄷ', 0, 'ㄷ'], ['ㅏ', 1, '다'], ['ㄹ', 1, '달'], ['ㄱ', 1, '닭'], ['ㅏ', 1, '달가']];
+
+        function text(editor: ReturnType<typeof createEditor>): string {
+            return editor.model.getBody()!.dataStream.split('\r')[0];
+        }
+
+        it.each([
+            { label: 'desktop', mobile: false },
+            { label: 'mobile', mobile: true },
+        ])('puts the joined syllables, not every step, into the $label document', async ({ mobile }) => {
+            const editor = createEditor(8, false, false, DocumentFlavor.TRADITIONAL, false, mobile);
+            try {
+                if (mobile) {
+                    (editor.selection as MobileDocSelectionRenderService).enterMobileEditMode();
+                }
+                editor.selection.focus();
+                const steps: string[] = [];
+                await type(editor, HANGEUL, () => steps.push(text(editor)));
+                expect(steps).toEqual(['Helloㅎ world', 'Hello하 world', 'Hello한 world', 'Hello한ㄱ world', 'Hello한그 world', 'Hello한글 world']);
+
+                // A space, then a final consonant that moves to the next syllable (달 → 닭 → 달가), then a digit and a letter.
+                press(editor.input, [' ', 0, ' '], 32);
+                await settle();
+                await type(editor, DALGA);
+                expect(text(editor)).toBe('Hello한글 달가 world');
+                press(editor.input, ['7', 0, '7'], 55);
+                await settle();
+                press(editor.input, ['a', 0, 'a'], 65);
+                await settle();
+                expect(text(editor)).toBe('Hello한글 달가7a world');
+                expect(editor.selectionManager.getActiveTextRange()).toMatchObject({ startOffset: 12, endOffset: 12 });
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('replaces a selection with the first jamo and keeps joining after it', async () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.replaceDocRanges([{ startOffset: 0, endOffset: 5 }], true, { shouldFocus: true });
+                await type(editor, HANGEUL.slice(0, 3));
+                expect(text(editor)).toBe('한 world');
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('starts over from an emptied input after a key the document handled', async () => {
+            const editor = createEditor(8, false);
+            // A shortcut (Backspace, Enter) runs on window in the capture phase and prevents the key. iOS then leaves
+            // the editable alone and starts a new syllable (measured: "ㅏ" after a prevented Backspace inserts "ㅏ").
+            const shortcut = (event: KeyboardEvent): void => {
+                const range = editor.selectionManager.getActiveTextRange();
+                if (range == null) {
+                    return;
+                }
+                if (event.key === 'Backspace') {
+                    event.preventDefault();
+                    void editor.commands.executeCommand(DeleteTextCommand.id, {
+                        unitId: editor.unitId,
+                        range,
+                        direction: DeleteDirection.LEFT,
+                        len: 1,
+                    });
+                } else if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void editor.commands.executeCommand(BreakLineCommand.id);
+                }
+            };
+            window.addEventListener('keydown', shortcut, true);
+            try {
+                editor.selection.focus();
+                await type(editor, HANGEUL.slice(0, 3));
+                expect(text(editor)).toBe('Hello한 world');
+
+                editor.input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', keyCode: 8, bubbles: true, cancelable: true }));
+                await settle();
+                expect(text(editor)).toBe('Hello world');
+                expect(editor.input.textContent).toBe('');
+
+                await type(editor, [['ㅏ', 0, 'ㅏ'], ['ㄱ', 0, 'ㄱ'], ['ㅏ', 1, '가']]);
+                expect(text(editor)).toBe('Helloㅏ가 world');
+
+                editor.input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+                await settle();
+                expect(editor.input.textContent).toBe('');
+                await type(editor, [['ㄴ', 0, 'ㄴ'], ['ㅏ', 1, '나']]);
+                expect(editor.model.getBody()!.dataStream.startsWith('Helloㅏ가\r나 world')).toBe(true);
+            } finally {
+                window.removeEventListener('keydown', shortcut, true);
+                editor.dispose();
+            }
+        });
+
+        it('does not replace text the document no longer holds before the caret', async () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.focus();
+                await type(editor, HANGEUL.slice(0, 3));
+                expect(text(editor)).toBe('Hello한 world');
+
+                // The caret moves (a tap) while the keyboard still joins: "한" + "ㅏ" removes "한" and inserts "하나".
+                editor.selection.replaceDocRanges([{ startOffset: 1, endOffset: 1 }], true, { shouldFocus: true });
+                await type(editor, [['ㅏ', 1, '하나']]);
+                expect(text(editor)).toBe('H하나ello한 world');
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('applies a removal no insertion follows at the end of the task', async () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.focus();
+                await type(editor, HANGEUL.slice(0, 4));
+                expect(text(editor)).toBe('Hello한ㄱ world');
+
+                editor.input.textContent = '한';
+                editor.input.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
+                await settle();
+                expect(text(editor)).toBe('Hello한ㄱ world');
+                await vi.advanceTimersByTimeAsync(0);
+                expect(text(editor)).toBe('Hello한 world');
+                expect(editor.selectionManager.getActiveTextRange()).toMatchObject({ startOffset: 6, endOffset: 6 });
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('replaces the word iOS autocorrect replaces', async () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.focus();
+                for (const [key, keyCode] of [['T', 84], ['e', 69], ['h', 72]] as const) {
+                    press(editor.input, [key, 0, key], keyCode);
+                    await settle();
+                }
+                // Measured for "Teh" + space: insertReplacementText over "Teh" (no data), then insertText " ".
+                editor.input.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', keyCode: 32, bubbles: true, cancelable: true }));
+                editor.input.textContent = 'The';
+                editor.input.dispatchEvent(new InputEvent('input', { inputType: 'insertReplacementText', bubbles: true }));
+                editor.input.textContent = 'The ';
+                editor.input.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: ' ', bubbles: true }));
+                await settle();
+                expect(text(editor)).toBe('HelloThe  world');
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('empties the input on a key an input method takes, as before', async () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.focus();
+                press(editor.input, ['a', 0, 'a'], 65);
+                await settle();
+                expect(editor.input.textContent).toBe('a');
+                editor.input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Process', keyCode: 229, bubbles: true, cancelable: true }));
+                expect(editor.input.textContent).toBe('');
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        // The typed text the input keeps between keys ("12" here) must never reach the document again. The platform can
+        // edit the input elsewhere than at its end — its caret moved inside by a key no shortcut takes (iOS spacebar
+        // drag, macOS Ctrl+B/A, Option+arrow) — and only the text that edit newly inserted belongs at the document caret,
+        // as when the input was emptied after every key.
+        async function typeTwelve(editor: ReturnType<typeof createEditor>): Promise<void> {
+            editor.selection.focus();
+            for (const [key, keyCode] of [['1', 49], ['2', 50]] as const) {
+                press(editor.input, [key, 0, key], keyCode);
+                await settle();
+            }
+            expect(text(editor)).toBe('Hello12 world');
+            expect(editor.input.textContent).toBe('12');
+        }
+
+        function edit(input: HTMLElement, inputType: string, after: string, data: string | null = null, key?: string): void {
+            if (key != null) {
+                input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+            }
+            input.dispatchEvent(new InputEvent('beforeinput', { inputType, data, bubbles: true, cancelable: true }));
+            input.textContent = after;
+            input.dispatchEvent(new InputEvent('input', { inputType, data, bubbles: true }));
+        }
+
+        it('puts only the new text into the document when the caret moved inside the input', async () => {
+            const editor = createEditor(8, false);
+            try {
+                await typeTwelve(editor);
+                // The input's caret went to its start; "3" lands before the kept "12".
+                edit(editor.input, 'insertText', '312', '3', '3');
+                await settle();
+                expect(text(editor)).toBe('Hello123 world');
+                expect(editor.input.textContent).toBe('');
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it.each([
+            { label: 'insertText inside the kept text', inputType: 'insertText', after: '1x2', data: 'x', key: 'x', expected: 'Hello12x' },
+            { label: 'insertText over a part of it selected', inputType: 'insertText', after: 'x2', data: 'x', key: 'x', expected: 'Hello12x' },
+            { label: 'deleteWordBackward', inputType: 'deleteWordBackward', after: '', expected: 'Hello12' },
+            { label: 'deleteContentForward', inputType: 'deleteContentForward', after: '2', expected: 'Hello12' },
+            { label: 'deleteContentBackward inside it', inputType: 'deleteContentBackward', after: '2', expected: 'Hello12' },
+            { label: 'insertFromPaste', inputType: 'insertFromPaste', after: '12pasted', expected: 'Hello12' },
+            { label: 'insertFromDrop', inputType: 'insertFromDrop', after: '1dropped2', expected: 'Hello12' },
+            { label: 'insertTranspose', inputType: 'insertTranspose', after: '21', expected: 'Hello12' },
+            { label: 'historyUndo', inputType: 'historyUndo', after: '1', expected: 'Hello12' },
+        ])('applies $label as with an emptied input and empties it', async ({ inputType, after, data, key, expected }) => {
+            const editor = createEditor(8, false);
+            try {
+                await typeTwelve(editor);
+                edit(editor.input, inputType, after, data ?? null, key);
+                await settle();
+                await vi.advanceTimersByTimeAsync(0);
+                expect(text(editor)).toBe(`${expected} world`);
+                expect(editor.input.textContent).toBe('');
+
+                press(editor.input, ['z', 0, 'z'], 90);
+                await settle();
+                expect(text(editor)).toBe(`${expected}z world`);
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('puts only the composed text into the document when a composition starts without keyCode 229', async () => {
+            const editor = createEditor(8, false);
+            try {
+                await typeTwelve(editor);
+                editor.input.dispatchEvent(new CompositionEvent('compositionstart', { data: '' }));
+                for (const composed of ['ㅎ', '하']) {
+                    editor.input.textContent = `12${composed}`;
+                    editor.input.dispatchEvent(new CompositionEvent('compositionupdate', { data: composed }));
+                    await settle();
+                }
+                editor.input.dispatchEvent(new CompositionEvent('compositionend', { data: '하' }));
+                await settle();
+                expect(text(editor)).toBe('Hello12하 world');
+                expect(editor.input.textContent).toBe('');
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('refuses the line breaks the platform would put into the input', () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.focus();
+                const before = (inputType: string): boolean => !editor.input.dispatchEvent(
+                    new InputEvent('beforeinput', { inputType, bubbles: true, cancelable: true })
+                );
+                expect(before('insertParagraph')).toBe(true);
+                expect(before('insertLineBreak')).toBe(true);
+                expect(before('insertText')).toBe(false);
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('empties the input on a key that may move its caret', async () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.focus();
+                const keys: KeyboardEventInit[] = [
+                    { key: 'ArrowLeft', keyCode: 37 },
+                    { key: 'b', keyCode: 66, ctrlKey: true },
+                    { key: 'ArrowLeft', keyCode: 37, altKey: true },
+                    { key: 'a', keyCode: 65, metaKey: true },
+                    { key: 'Enter', keyCode: 13 },
+                ];
+                for (const init of keys) {
+                    press(editor.input, ['a', 0, 'a'], 65);
+                    await settle();
+                    expect(editor.input.textContent).toBe('a');
+                    editor.input.dispatchEvent(new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true }));
+                    expect(editor.input.textContent, init.key).toBe('');
+                }
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('puts in the suggestion tapped for the word before the caret', async () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.focus();
+                await type(editor, HANGEUL);
+                expect(text(editor)).toBe('Hello한글 world');
+                // Measured for the suggestion "한글날": insertReplacementText over "한글" (no data), the input then holds "한글날".
+                edit(editor.input, 'insertReplacementText', '한글날');
+                await settle();
+                expect(text(editor)).toBe('Hello한글날 world');
+                expect(editor.selectionManager.getActiveTextRange()).toMatchObject({ startOffset: 8, endOffset: 8 });
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        it('keeps joining across the Shift key of a doubled consonant', async () => {
+            const editor = createEditor(8, false);
+            try {
+                editor.selection.focus();
+                await type(editor, [['ㅎ', 0, 'ㅎ'], ['ㅐ', 1, '해']]);
+                // Measured: Shift sends its own keydown ("Shift", keyCode 16) before "ㅆ" replaces 해 with 했.
+                editor.input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', keyCode: 16, shiftKey: true, bubbles: true, cancelable: true }));
+                expect(editor.input.textContent).toBe('해');
+                await type(editor, [['ㅆ', 1, '했'], ['ㄷ', 0, 'ㄷ'], ['ㅏ', 1, '다']]);
+                expect(text(editor)).toBe('Hello했다 world');
+            } finally {
+                editor.dispose();
+            }
+        });
+
+        describe('caret moved by other means', () => {
+            // Measured in iOS Safari (CNT-5176): the keyboard keeps composing the syllable before the caret of the hidden
+            // input when the caret moves on the canvas, and only a focus moved to another text field ends that.
+            let breakerFocuses = 0;
+            const leaked: string[] = [];
+            const countBreaker = (event: FocusEvent): void => {
+                if (event.target instanceof HTMLInputElement && event.target.readOnly) {
+                    breakerFocuses += 1;
+                }
+            };
+            const watchLeak = (event: FocusEvent): void => {
+                leaked.push(`${event.type}:${(event.target as HTMLElement).tagName}`);
+            };
+
+            beforeEach(() => {
+                breakerFocuses = 0;
+                leaked.length = 0;
+                document.addEventListener('focusin', countBreaker, true);
+                window.addEventListener('focusin', watchLeak);
+                window.addEventListener('focusout', watchLeak);
+            });
+
+            afterEach(() => {
+                testPlatform.isIOS = false;
+                document.removeEventListener('focusin', countBreaker, true);
+                window.removeEventListener('focusin', watchLeak);
+                window.removeEventListener('focusout', watchLeak);
+            });
+
+            it('ends the composition once and puts the next key alone at the new caret on iOS', async () => {
+                testPlatform.isIOS = true;
+                const editor = createEditor(8, false);
+                const focusAndBlur: string[] = [];
+                editor.selection.onFocus$.subscribe(() => focusAndBlur.push('focus'));
+                editor.selection.onBlur$.subscribe(() => focusAndBlur.push('blur'));
+                try {
+                    editor.selection.focus();
+                    leaked.length = 0;
+                    await type(editor, HANGEUL.slice(0, 3));
+                    expect(text(editor)).toBe('Hello한 world');
+
+                    // A tap before "e", in a later task: the selection comes from the canvas, not from the platform's input.
+                    await vi.advanceTimersByTimeAsync(0);
+                    editor.selection.replaceDocRanges([{ startOffset: 1, endOffset: 1 }], true, { shouldFocus: true });
+                    expect(breakerFocuses).toBe(1);
+                    expect(editor.input.textContent).toBe('');
+                    expect(document.activeElement).toBe(editor.input);
+                    expect(focusAndBlur).toEqual([]);
+                    expect(leaked).toEqual([]);
+
+                    // The keyboard starts a new syllable: "ㄱ" alone, then "ㅏ" joins it.
+                    await type(editor, [['ㄱ', 0, 'ㄱ'], ['ㅏ', 1, '가']]);
+                    expect(text(editor)).toBe('H가ello한 world');
+                    expect(breakerFocuses).toBe(1);
+                } finally {
+                    editor.dispose();
+                }
+            });
+
+            it('leaves the composition alone for the caret its own input moves on iOS', async () => {
+                testPlatform.isIOS = true;
+                const editor = createEditor(8, false);
+                try {
+                    editor.selection.focus();
+                    // Every key in its own task, as on the device: the caret each edit publishes is the expected one.
+                    const keys: Array<[Key, number]> = [...HANGEUL.map((key): [Key, number] => [key, 0]), [[' ', 0, ' '], 32], ...DALGA.map((key): [Key, number] => [key, 0])];
+                    for (const [key, keyCode] of keys) {
+                        press(editor.input, key, keyCode);
+                        await settle();
+                        await vi.advanceTimersByTimeAsync(0);
+                    }
+                    expect(text(editor)).toBe('Hello한글 달가 world');
+                    expect(breakerFocuses).toBe(0);
+                    expect(editor.input.textContent).toBe('한글 달가');
+
+                    // A later publication of the same caret (layout catching up, a refresh) is not a move.
+                    const caret = editor.selectionManager.getActiveTextRange()!.startOffset;
+                    editor.selection.replaceDocRanges([{ startOffset: caret, endOffset: caret }], true, { shouldFocus: true });
+                    expect(breakerFocuses).toBe(0);
+                    expect(editor.input.textContent).toBe('한글 달가');
+                } finally {
+                    editor.dispose();
+                }
+            });
+
+            it('does nothing outside iOS', async () => {
+                const editor = createEditor(8, false);
+                try {
+                    editor.selection.focus();
+                    await type(editor, HANGEUL.slice(0, 3));
+                    editor.selection.replaceDocRanges([{ startOffset: 1, endOffset: 1 }], true, { shouldFocus: true });
+                    expect(breakerFocuses).toBe(0);
+                    expect(editor.input.textContent).toBe('한');
+                } finally {
+                    editor.dispose();
+                }
+            });
+        });
+
+        it('turns Safari autocorrect off on the input', () => {
+            const editor = createEditor(8, false);
+            try {
+                expect(editor.input.getAttribute('autocorrect')).toBe('off');
+            } finally {
+                editor.dispose();
+            }
+        });
     });
 });
