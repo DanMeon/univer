@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 ios-enter-beforeinput: Enter from the editor input on iOS is not prevented
+
 /**
  * @vitest-environment jsdom
  */
@@ -666,5 +668,99 @@ describe('ShortcutService', () => {
         expect(executeCommand).not.toHaveBeenCalled();
         expect(event.defaultPrevented).toBe(false);
         service.dispose();
+    });
+});
+
+describe('ShortcutService Enter on iOS', () => {
+    // iOS keeps its on-screen keyboard composing after a prevented Enter (CNT-5176); the editor's hidden input refuses
+    // the line break at beforeinput instead, so the shortcut leaves the key's default to it there.
+    function setup(isIOS: boolean) {
+        class TestPlatformService {
+            isMac = false;
+            isWindows = false;
+            isLinux = false;
+            isIOS = isIOS;
+        }
+
+        const injector = new Injector();
+        injector.add([ICommandService, { useClass: CommandService }]);
+        injector.add([IConfigService, { useClass: ConfigService }]);
+        injector.add([IContextService, { useClass: ContextService }]);
+        injector.add([ILogService, { useClass: DesktopLogService }]);
+        injector.add([IPlatformService, { useClass: TestPlatformService }]);
+        injector.add([IUIRuntimeScopeService, { useClass: UIRuntimeScopeService }]);
+        injector.add([ShortcutService]);
+        const service = injector.get(ShortcutService);
+        let runs = 0;
+        injector.get(ICommandService).registerCommand({
+            id: 'test.key-command',
+            type: CommandType.OPERATION,
+            handler: () => {
+                runs += 1;
+                return true;
+            },
+        });
+        service.registerShortcut({ id: 'test.key-command', binding: KeyCode.ENTER });
+        service.registerShortcut({ id: 'test.key-command', binding: KeyCode.ENTER | MetaKeys.SHIFT });
+        service.registerShortcut({ id: 'test.key-command', binding: KeyCode.BACKSPACE });
+
+        const editorInput = document.createElement('div');
+        editorInput.dataset.uComp = 'editor';
+        editorInput.contentEditable = 'true';
+        const hostField = document.createElement('div');
+        document.body.append(editorInput, hostField);
+
+        const press = (target: HTMLElement, key: string, keyCode: number, shiftKey = false): KeyboardEvent => {
+            const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key, keyCode, shiftKey });
+            target.dispatchEvent(event);
+            return event;
+        };
+
+        return {
+            editorInput,
+            hostField,
+            press,
+            runs: () => runs,
+            dispose: () => {
+                editorInput.remove();
+                hostField.remove();
+                injector.dispose();
+            },
+        };
+    }
+
+    it.each([
+        { label: 'Enter', shiftKey: false },
+        { label: 'Shift+Enter', shiftKey: true },
+    ])('runs the $label command once without preventing the key in the editor input', async ({ shiftKey }) => {
+        const { editorInput, press, runs, dispose } = setup(true);
+        try {
+            const event = press(editorInput, 'Enter', KeyCode.ENTER, shiftKey);
+            await expect.poll(runs).toBe(1);
+            expect(event.defaultPrevented).toBe(false);
+        } finally {
+            dispose();
+        }
+    });
+
+    it('prevents Enter from other targets and other keys from the editor input on iOS', async () => {
+        const { editorInput, hostField, press, runs, dispose } = setup(true);
+        try {
+            expect(press(hostField, 'Enter', KeyCode.ENTER).defaultPrevented).toBe(true);
+            expect(press(editorInput, 'Backspace', KeyCode.BACKSPACE).defaultPrevented).toBe(true);
+            await expect.poll(runs).toBe(2);
+        } finally {
+            dispose();
+        }
+    });
+
+    it('prevents Enter from the editor input outside iOS, as before', async () => {
+        const { editorInput, press, runs, dispose } = setup(false);
+        try {
+            expect(press(editorInput, 'Enter', KeyCode.ENTER).defaultPrevented).toBe(true);
+            await expect.poll(runs).toBe(1);
+        } finally {
+            dispose();
+        }
     });
 });

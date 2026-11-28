@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 ios-enter-beforeinput: on iOS an Enter shortcut from the Univer editor's hidden input runs without preventing the key, so the on-screen keyboard ends its composition
+
 import type { IDisposable } from '@univerjs/core';
 import type { Observable } from 'rxjs';
 import { createIdentifier, Disposable, ICommandService, IContextService, Optional, toDisposable } from '@univerjs/core';
@@ -312,8 +314,23 @@ export class ShortcutService extends Disposable implements IShortcutService {
         if (candidate) {
             this._getRuntimeService<ICommandService>(e, ICommandService)?.executeCommand(candidate.id, candidate.staticParameters) ??
                 this._commandService.executeCommand(candidate.id, candidate.staticParameters);
-            e.preventDefault();
+            if (!this._leavesEnterDefaultToEditorInput(e)) {
+                e.preventDefault();
+            }
         }
+    }
+
+    /**
+     * iOS keeps its on-screen keyboard composing when the Enter key is prevented: "하", Enter, "ㄱ" types "학" into the
+     * next cell (measured in iOS Safari, CNT-5176). Like ProseMirror and CodeMirror 6, the key's default is left to
+     * run there and the Univer editor's hidden input (docs-ui) refuses the line break at beforeinput, which ends the
+     * composition. The shortcut's command has already run above. Other targets and other platforms are unchanged.
+     */
+    private _leavesEnterDefaultToEditorInput(e: KeyboardEvent): boolean {
+        return this._platformService.isIOS === true &&
+            e.keyCode === KeyCode.ENTER &&
+            e.target instanceof HTMLElement &&
+            e.target.dataset.uComp === 'editor';
     }
 
     dispatch(e: KeyboardEvent): IShortcutItem<object> | undefined {
