@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by Carenode, 2026 — CNT-5176 ios-enter-beforeinput: isIOS (iPhone, iPod, iPad including its desktop user agent)
+
 import { createIdentifier } from '@univerjs/core';
 
 /**
@@ -23,6 +25,11 @@ export interface IPlatformService {
     readonly isMac: boolean;
     readonly isWindows: boolean;
     readonly isLinux: boolean;
+    /**
+     * Whether the page runs on iOS or iPadOS. Optional so that existing implementations stay valid; absent means not
+     * iOS.
+     */
+    readonly isIOS?: boolean;
 }
 
 export const IPlatformService = createIdentifier<IPlatformService>('ui.platform.service');
@@ -38,5 +45,11 @@ export class PlatformService implements IPlatformService {
 
     get isLinux(): boolean {
         return /Linux/.test(navigator.appVersion);
+    }
+
+    get isIOS(): boolean {
+        const { userAgent, maxTouchPoints = 0 } = navigator;
+        // iPadOS Safari asks for desktop pages by default and then reports a Mac user agent; a Mac has no touch points.
+        return /iPhone|iPad|iPod/.test(userAgent) || (/Macintosh/.test(userAgent) && maxTouchPoints > 1);
     }
 }
